@@ -416,6 +416,15 @@ struct TerminalState {
     alt_saved_col: i64,
     scroll_accumulator: i64,
     viewport_row: i64,
+    kitty_kbd_flags_0: i64,
+    kitty_kbd_flags_1: i64,
+    kitty_kbd_flags_2: i64,
+    kitty_kbd_flags_3: i64,
+    kitty_kbd_flags_4: i64,
+    kitty_kbd_flags_5: i64,
+    kitty_kbd_flags_6: i64,
+    kitty_kbd_flags_7: i64,
+    kitty_kbd_idx: i64,
 
     /// Create a terminal with the given dimensions and default state.
     static fn init(rows: i64, cols: i64) TerminalState {
@@ -497,6 +506,15 @@ struct TerminalState {
             alt_saved_col: 0,
             scroll_accumulator: 0,
             viewport_row: -1,
+            kitty_kbd_flags_0: 0,
+            kitty_kbd_flags_1: 0,
+            kitty_kbd_flags_2: 0,
+            kitty_kbd_flags_3: 0,
+            kitty_kbd_flags_4: 0,
+            kitty_kbd_flags_5: 0,
+            kitty_kbd_flags_6: 0,
+            kitty_kbd_flags_7: 0,
+            kitty_kbd_idx: 0,
         }
     }
 
@@ -964,6 +982,105 @@ struct TerminalState {
         self.active_charset = 0
         self.cursor_shape = 0
         self.pending_wrap = false
+        self.kittyKeyboardReset()
+    }
+
+    // -- Kitty Keyboard Protocol --------------------------------------------
+
+    /// Get the Kitty keyboard flag at the given stack index.
+    fn kittyKbdGet(idx: i64) i64 {
+        return switch (idx) {
+            0 => self.kitty_kbd_flags_0,
+            1 => self.kitty_kbd_flags_1,
+            2 => self.kitty_kbd_flags_2,
+            3 => self.kitty_kbd_flags_3,
+            4 => self.kitty_kbd_flags_4,
+            5 => self.kitty_kbd_flags_5,
+            6 => self.kitty_kbd_flags_6,
+            7 => self.kitty_kbd_flags_7,
+            else => 0,
+        }
+    }
+
+    /// Set the Kitty keyboard flag at the given stack index.
+    fn kittyKbdSet(idx: i64, val: i64) void {
+        switch (idx) {
+            0 => { self.kitty_kbd_flags_0 = val },
+            1 => { self.kitty_kbd_flags_1 = val },
+            2 => { self.kitty_kbd_flags_2 = val },
+            3 => { self.kitty_kbd_flags_3 = val },
+            4 => { self.kitty_kbd_flags_4 = val },
+            5 => { self.kitty_kbd_flags_5 = val },
+            6 => { self.kitty_kbd_flags_6 = val },
+            7 => { self.kitty_kbd_flags_7 = val },
+            else => {},
+        }
+    }
+
+    /// Return the current Kitty keyboard flags (top of stack).
+    fn kittyKeyboardFlags() i64 {
+        if (self.kitty_kbd_idx == 0) { return 0 }
+        return self.kittyKbdGet(self.kitty_kbd_idx - 1)
+    }
+
+    /// Push flags onto the Kitty keyboard stack.
+    /// If stack is full (8), evict the oldest entry by shifting down.
+    fn kittyKeyboardPush(flags: i64) void {
+        if (self.kitty_kbd_idx >= 8) {
+            // Shift everything down — evict oldest
+            var i: i64 = 0
+            while (i < 7) {
+                self.kittyKbdSet(i, self.kittyKbdGet(i + 1))
+                i += 1
+            }
+            self.kitty_kbd_idx = 7
+        }
+        self.kittyKbdSet(self.kitty_kbd_idx, flags)
+        self.kitty_kbd_idx += 1
+    }
+
+    /// Pop n entries from the Kitty keyboard stack.
+    fn kittyKeyboardPop(n: i64) void {
+        self.kitty_kbd_idx -= n
+        if (self.kitty_kbd_idx < 0) { self.kitty_kbd_idx = 0 }
+    }
+
+    /// Set Kitty keyboard flags with mode:
+    /// 1 = replace (set), 2 = OR (union), 3 = NOT (difference).
+    fn kittyKeyboardSetFlags(mode: i64, flags: i64) void {
+        if (self.kitty_kbd_idx == 0) {
+            // No entry on stack — push one
+            self.kittyKeyboardPush(0)
+        }
+        const idx = self.kitty_kbd_idx - 1
+        if (mode == 1) {
+            self.kittyKbdSet(idx, flags)
+        } else if (mode == 2) {
+            self.kittyKbdSet(idx, self.kittyKbdGet(idx) | flags)
+        } else if (mode == 3) {
+            self.kittyKbdSet(idx, self.kittyKbdGet(idx) & (flags ^ 0x1F))
+        }
+    }
+
+    /// Reset the Kitty keyboard stack.
+    fn kittyKeyboardReset() void {
+        self.kitty_kbd_flags_0 = 0
+        self.kitty_kbd_flags_1 = 0
+        self.kitty_kbd_flags_2 = 0
+        self.kitty_kbd_flags_3 = 0
+        self.kitty_kbd_flags_4 = 0
+        self.kitty_kbd_flags_5 = 0
+        self.kitty_kbd_flags_6 = 0
+        self.kitty_kbd_flags_7 = 0
+        self.kitty_kbd_idx = 0
+    }
+
+    /// Send a Kitty keyboard flags query response: CSI ? flags u
+    fn sendKittyKeyboardReport() void {
+        if (self.pty_fd < 0) { return }
+        writeStr(self.pty_fd, "\x1b[?")
+        self.writeDecimal(self.pty_fd, self.kittyKeyboardFlags())
+        writeStr(self.pty_fd, "u")
     }
 
     // -- DEC Private Modes --------------------------------------------------
@@ -1989,6 +2106,125 @@ fn keyToTerminalBytes(fd: i64, key: i64, mods: i64, app_cursor: bool) void {
 }
 
 // ============================================================================
+// Kitty keyboard encoding
+// ============================================================================
+
+/// Map a KEY_* constant to its Kitty legacy codepoint and final byte.
+/// Returns (codepoint, final_byte). Final 'u' means CSI codepoint;mods u format.
+/// Other finals use legacy CSI code;mods final format (arrows, F-keys, etc).
+fn kittyMapping(key: i64) (i64, i64) {
+    return switch (key) {
+        KEY_ESCAPE => (27, 'u'),
+        KEY_ENTER => (13, 'u'),
+        KEY_TAB => (9, 'u'),
+        KEY_BACKSPACE => (127, 'u'),
+        KEY_ARROW_UP => (1, 'A'),
+        KEY_ARROW_DOWN => (1, 'B'),
+        KEY_ARROW_RIGHT => (1, 'C'),
+        KEY_ARROW_LEFT => (1, 'D'),
+        KEY_HOME => (1, 'H'),
+        KEY_END => (1, 'F'),
+        KEY_F1 => (1, 'P'),
+        KEY_F2 => (1, 'Q'),
+        KEY_F3 => (1, 'R'),
+        KEY_F4 => (1, 'S'),
+        KEY_F5 => (15, '~'),
+        KEY_F6 => (17, '~'),
+        KEY_F7 => (18, '~'),
+        KEY_F8 => (19, '~'),
+        KEY_F9 => (20, '~'),
+        KEY_F10 => (21, '~'),
+        KEY_F11 => (23, '~'),
+        KEY_F12 => (24, '~'),
+        KEY_DELETE => (3, '~'),
+        KEY_PAGE_UP => (5, '~'),
+        KEY_PAGE_DOWN => (6, '~'),
+        else => {
+            // Printable ASCII uses 'u' final with the codepoint itself
+            if (key >= 32 and key <= 126) {
+                return (key, 'u')
+            }
+            return (0, 0)
+        },
+    }
+}
+
+/// Encode a key event using the Kitty keyboard protocol and write to PTY.
+/// flags: current kitty keyboard flags from the stack.
+/// event_type: 0=press, 1=repeat, 2=release.
+fn keyToTerminalBytesKitty(fd: i64, key: i64, mods: i64, flags: i64, event_type: i64, app_cursor: bool) void {
+    // If no kitty flags active, fall through to legacy encoding
+    if (flags == 0) {
+        if (event_type != 0) { return }  // Legacy doesn't support repeat/release
+        keyToTerminalBytes(fd, key, mods, app_cursor)
+        return
+    }
+
+    const codepoint, final = kittyMapping(key)
+    if (codepoint == 0) { return }
+
+    // Skip non-press events unless report_events (bit 1) is set
+    if (event_type != 0 and (flags & 2) == 0) { return }
+
+    // Build kitty modifier value: 1 + shift(1) + alt(2) + ctrl(4) + super(8)
+    var kitty_mods: i64 = 1
+    if ((mods & MOD_SHIFT) != 0) { kitty_mods = kitty_mods + 1 }
+    if ((mods & MOD_ALT) != 0) { kitty_mods = kitty_mods + 2 }
+    if ((mods & MOD_CTRL) != 0) { kitty_mods = kitty_mods + 4 }
+    if ((mods & MOD_SUPER) != 0) { kitty_mods = kitty_mods + 8 }
+
+    const has_mods = kitty_mods > 1
+    const has_event = event_type > 0
+
+    // Unless report_all_keys (bit 3), special-case unmodified simple keys
+    if ((flags & 8) == 0) {
+        if (!has_mods and !has_event) {
+            if (codepoint == 13 and final == 'u') { writeStr(fd, "\r"); return }
+            if (codepoint == 9 and final == 'u') { writeStr(fd, "\t"); return }
+            if (codepoint == 127 and final == 'u') { writeStr(fd, "\x7f"); return }
+            if (codepoint == 27 and final == 'u') { writeStr(fd, "\x1b"); return }
+            // Unmodified printable → send raw byte
+            if (final == 'u' and codepoint >= 32 and codepoint <= 126) {
+                writeByte(fd, codepoint)
+                return
+            }
+        }
+    }
+
+    // Build CSI sequence
+    writeStr(fd, "\x1b[")
+
+    if (final == 'u') {
+        // CSI codepoint [;mods[:event]] u
+        writeDecimalFree(fd, codepoint)
+        if (has_mods or has_event) {
+            writeStr(fd, ";")
+            writeDecimalFree(fd, kitty_mods)
+            if (has_event) {
+                writeStr(fd, ":")
+                writeDecimalFree(fd, event_type + 1)  // 1=press, 2=repeat, 3=release
+            }
+        }
+        writeByte(fd, 'u')
+    } else {
+        // Legacy final: CSI [code] [;mods[:event]] final
+        // For keys where code==1, omit it when no mods (matches xterm behavior)
+        if (codepoint != 1 or has_mods or has_event) {
+            writeDecimalFree(fd, codepoint)
+        }
+        if (has_mods or has_event) {
+            writeStr(fd, ";")
+            writeDecimalFree(fd, kitty_mods)
+            if (has_event) {
+                writeStr(fd, ":")
+                writeDecimalFree(fd, event_type + 1)
+            }
+        }
+        writeByte(fd, final)
+    }
+}
+
+// ============================================================================
 // Tests — Grid
 // ============================================================================
 
@@ -2627,4 +2863,102 @@ test "selection across rows and text extraction" {
     @assertEq(@intToPtr(*u8, buf.items + 2).*, '\n')
     @assertEq(@intToPtr(*u8, buf.items + 3).*, 'E')
     @assertEq(@intToPtr(*u8, buf.items + 4).*, 'F')
+}
+
+// ============================================================================
+// Tests — Kitty Keyboard Encoding
+// ============================================================================
+
+/// Helper: capture bytes from keyToTerminalBytesKitty and return them as a string.
+fn captureKittyKey(key: i64, mods: i64, flags: i64, event_type: i64) List(i64) {
+    captureBegin()
+    keyToTerminalBytesKitty(-1, key, mods, flags, event_type, false)
+    return captureEnd()
+}
+
+/// Helper: compare captured bytes with expected string.
+fn capturedEquals(bytes: List(i64), expected: string) bool {
+    if (bytes.count != @lenOf(expected)) { return false }
+    var i: i64 = 0
+    while (i < bytes.count) {
+        if (bytes.get(i) != @intToPtr(*u8, @ptrOf(expected) + i).*) { return false }
+        i += 1
+    }
+    return true
+}
+
+test "kitty key encode basic disambiguate" {
+    // With disambiguate (flag=1) but no report_all, unmodified 'a' → raw 'a'
+    const bytes = captureKittyKey('a', 0, 1, 0)
+    @assertEq(bytes.count, 1)
+    @assertEq(bytes.get(0), 'a')
+}
+
+test "kitty key encode report all printable" {
+    // With report_all_keys (flag=8+1=9), unmodified 'a' → CSI 97 u
+    const bytes = captureKittyKey('a', 0, 9, 0)
+    @assert(capturedEquals(bytes, "\x1b[97u"))
+}
+
+test "kitty key encode mods" {
+    // Ctrl+A with disambiguate: CSI 97;5u (mods = 1 + ctrl(4) = 5)
+    const bytes = captureKittyKey('a', MOD_CTRL, 1, 0)
+    @assert(capturedEquals(bytes, "\x1b[97;5u"))
+}
+
+test "kitty key encode report all" {
+    // Enter with report_all_keys (flag=8): CSI 13 u (no mods section needed)
+    const bytes = captureKittyKey(KEY_ENTER, 0, 9, 0)
+    @assert(capturedEquals(bytes, "\x1b[13u"))
+}
+
+test "kitty key encode arrow" {
+    // Up arrow with disambiguate: CSI 1;1A (kitty format)
+    const bytes = captureKittyKey(KEY_ARROW_UP, 0, 1, 0)
+    @assert(capturedEquals(bytes, "\x1b[A"))
+}
+
+test "kitty key encode arrow with mods" {
+    // Shift+Up with disambiguate: CSI 1;2A
+    const bytes = captureKittyKey(KEY_ARROW_UP, MOD_SHIFT, 1, 0)
+    @assert(capturedEquals(bytes, "\x1b[1;2A"))
+}
+
+test "kitty key encode release" {
+    // Release 'a' with report_events (flag=3): CSI 97;1:3u
+    const bytes = captureKittyKey('a', 0, 3, 2)
+    @assert(capturedEquals(bytes, "\x1b[97;1:3u"))
+}
+
+test "kitty key encode no flags fallback" {
+    // No kitty flags → falls through to legacy
+    // Press 'a' → just the byte 'a'
+    const bytes = captureKittyKey('a', 0, 0, 0)
+    @assertEq(bytes.count, 1)
+    @assertEq(bytes.get(0), 'a')
+}
+
+test "kitty key encode no release without flag" {
+    // Release event with flags=1 (no report_events) → nothing
+    const bytes = captureKittyKey('a', 0, 1, 2)
+    @assertEq(bytes.count, 0)
+}
+
+test "kitty key encode unmodified enter without report all" {
+    // Unmodified Enter with disambiguate only (flag=1) → \r (legacy pass-through)
+    const bytes = captureKittyKey(KEY_ENTER, 0, 1, 0)
+    @assertEq(bytes.count, 1)
+    @assertEq(bytes.get(0), 13)
+}
+
+test "kitty key encode F5" {
+    // F5 with disambiguate: CSI 15~ (legacy tilde format)
+    const bytes = captureKittyKey(KEY_F5, 0, 1, 0)
+    @assert(capturedEquals(bytes, "\x1b[15~"))
+}
+
+test "kitty key encode F5 with mods" {
+    // Ctrl+F5 with disambiguate: CSI 15;5~
+    const bytes = captureKittyKey(KEY_F5, MOD_CTRL, 1, 0)
+    @assert(capturedEquals(bytes, "\x1b[15;5~"))
 }

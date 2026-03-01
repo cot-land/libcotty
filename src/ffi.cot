@@ -359,6 +359,25 @@ export fn cotty_terminal_key(surface: i64, key: i64, mods: i64) void {
     sptr.inspector.recordKeyEvent(key, mods, bytes)
 }
 
+/// Send a key event with event type to a terminal surface.
+/// Routes through Kitty encoder when flags are active, falls back to legacy.
+/// event_type: 0=press, 1=repeat, 2=release.
+export fn cotty_terminal_key_event(surface: i64, key: i64, mods: i64, event_type: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.terminal.scrollToBottom()
+    captureBegin()
+    const flags = sptr.terminal.kittyKeyboardFlags()
+    keyToTerminalBytesKitty(sptr.shell.master_fd, key, mods, flags, event_type, sptr.terminal.mode_app_cursor)
+    const bytes = captureEnd()
+    sptr.inspector.recordKeyEvent(key, mods, bytes)
+}
+
+/// Return the current Kitty keyboard flags for a terminal surface.
+/// Swift uses this to decide whether to send keyUp events.
+export fn cotty_terminal_kitty_keyboard(surface: i64) i64 {
+    return getSurfacePtr(surface).terminal.kittyKeyboardFlags()
+}
+
 /// Write raw bytes to the terminal's PTY (sends input to the shell).
 export fn cotty_terminal_write(surface: i64, ptr: *u8, len: i64) void {
     const sptr = getSurfacePtr(surface)

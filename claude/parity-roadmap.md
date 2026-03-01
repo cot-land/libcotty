@@ -95,7 +95,7 @@ libcotty: `terminal.cot`, `vt_parser.cot`
 - [x] DSR operating status (CSI 5 n) — sends `\e[0n`
 - [ ] Tertiary DA (CSI = c) — unit ID report
 - [x] DECRQM (CSI ? Ps $ p) — report mode value
-- [ ] DECRQSS (DCS $ q) — report setting value
+- [x] DECRQSS (DCS $ q) — report setting value
 - [ ] XTVERSION (CSI > 0 q) — terminal version report
 
 ### 1.8 Complete DECSET/DECRST Modes
@@ -207,7 +207,7 @@ libcotty: `vt_parser.cot` (Escape state handler)
 - [x] ESC H — set tab stop at current column (HTS)
 - [x] ESC N — single shift G2 (SS2)
 - [x] ESC O — single shift G3 (SS3)
-- [ ] ESC P — DCS introducer
+- [x] ESC P — DCS introducer
 - [ ] ESC Z — return terminal ID (DECID, obsolete)
 - [ ] ESC \ — string terminator (ST) — may already be handled in OSC/DCS context
 - [ ] ESC 6 — back index (DECBI)
@@ -245,11 +245,11 @@ libcotty: `vt_parser.cot` dispatchOsc()
 ### 2.4 DCS (Device Control String)
 
 Ghostty ref: `src/terminal/dcs.zig`
-libcotty: `vt_parser.cot` — NOT IMPLEMENTED
+libcotty: `vt_parser.cot`
 
-- [ ] DCS state machine in parser (DCS → params → passthrough → ST)
-- [ ] DECRQSS (DCS $ q) — request setting status
-- [ ] XTGETTCAP (DCS + q) — request terminfo capability
+- [x] DCS state machine in parser (DCS → params → passthrough → ST)
+- [x] DECRQSS (DCS $ q) — request setting status
+- [x] XTGETTCAP (DCS + q) — request terminfo capability
 - [ ] DECSIXEL (DCS Ps ; Ps q) — sixel graphics (low priority)
 
 ### 2.5 C0 Control Characters
@@ -336,17 +336,17 @@ libcotty: `terminal.cot` decSpecialMap(), `vt_parser.cot`
 ### 3.1 Kitty Keyboard Protocol
 
 Ghostty ref: `src/terminal/kitty/key.zig`
-libcotty: NOT IMPLEMENTED
+libcotty: `terminal.cot`, `vt_parser.cot`, `ffi.cot`
 
 This is a large feature. Programs detect support via DA or mode query.
 
-- [ ] CSI ? u — query keyboard protocol flags
-- [ ] CSI > flags u — push keyboard mode
-- [ ] CSI < u — pop keyboard mode
-- [ ] Enhanced key encoding (disambiguate, report events, report alternates, report all keys)
-- [ ] CSI unicode-codepoint u — key event encoding
+- [x] CSI ? u — query keyboard protocol flags
+- [x] CSI > flags u — push keyboard mode
+- [x] CSI < u — pop keyboard mode
+- [x] Enhanced key encoding (disambiguate, report events, report alternates, report all keys)
+- [x] CSI unicode-codepoint u — key event encoding
 - [ ] Associated text reporting
-- [ ] Modifier encoding in CSI u format
+- [x] Modifier encoding in CSI u format
 
 ### 3.2 Kitty Graphics Protocol
 
@@ -531,11 +531,11 @@ libcotty: basic UTF-8 decode in `vt_parser.cot`
 
 | Phase | Total Items | Done | Remaining |
 |-------|------------|------|-----------|
-| 1 — Daily Driver | ~35 | ~32 | ~3 |
-| 2 — Correctness | ~65 | ~55 | ~10 |
-| 3 — Modern Protocols | ~25 | ~3 | ~22 |
+| 1 — Daily Driver | ~35 | ~33 | ~2 |
+| 2 — Correctness | ~65 | ~58 | ~7 |
+| 3 — Modern Protocols | ~25 | ~9 | ~16 |
 | 4 — Config | ~15 | ~7 | ~8 |
 | 5 — Infrastructure | ~25 | ~4 | ~21 |
-| **Total** | **~165** | **~101** | **~64** |
+| **Total** | **~165** | **~111** | **~54** |
 
-libcotty is at roughly **61% checkbox completion**. Phase 1 and 2 are nearly complete — VT parser, grid, SGR, DA/DSR, DECRQM, mouse, selection, clipboard, alt screen, reflow, keypad mode, single shifts, and all standard ESC/CSI sequences are solid. The biggest gaps are in modern protocols (Kitty keyboard/graphics), search, keybindings, and Unicode width handling.
+libcotty is at roughly **67% checkbox completion**. Phase 1 and 2 are nearly complete — VT parser, grid, SGR, DA/DSR, DECRQM/DECRQSS, mouse, selection, clipboard, alt screen, reflow, keypad mode, single shifts, and all standard ESC/CSI sequences are solid. Phase 3 has the Kitty keyboard protocol and DCS state machine working. The biggest remaining gaps are Kitty graphics, hyperlinks, semantic prompts, search, keybindings, and Unicode width handling.
