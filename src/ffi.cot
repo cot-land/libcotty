@@ -15,6 +15,7 @@ import "vt_parser"
 import "pty"
 import "config"
 import "inspector"
+import "workspace"
 
 // ============================================================================
 // Globals
@@ -959,5 +960,193 @@ export fn cotty_terminal_jump_next_prompt(surface: i64) i64 {
 /// Return the semantic marker for a row (0=none, 1=prompt, 2=input, 3=output).
 export fn cotty_terminal_row_semantic(surface: i64, row: i64) i64 {
     return getSurfacePtr(surface).terminal.grid.getRowSemantic(row)
+}
+
+// ============================================================================
+// Workspace
+// ============================================================================
+
+/// Cast an opaque workspace handle to a *Workspace pointer.
+fn getWorkspacePtr(handle: i64) *Workspace {
+    return @intToPtr(*Workspace, handle)
+}
+
+/// Create a new workspace. Heap-allocated, returns an opaque handle.
+export fn cotty_workspace_new(app: i64) i64 {
+    const ws = Workspace.init(&g_app)
+    // Allocate on heap and copy
+    const ptr = alloc(0, @sizeOf(Workspace))
+    const dst = @intToPtr(*Workspace, ptr)
+    dst.* = ws
+    return ptr
+}
+
+/// Free a workspace. Surfaces are freed separately via app.
+export fn cotty_workspace_free(workspace: i64) void {
+    // Workspace will be cleaned up when the list is cleared.
+    // Individual surface cleanup is done by Swift via cotty_terminal_surface_free / cotty_surface_free.
+}
+
+// ---- Tab operations ----
+
+/// Add a terminal tab. Returns the surface handle.
+export fn cotty_workspace_add_terminal_tab(ws: i64, rows: i64, cols: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    const surface_handle = wptr.addTerminalTab(rows, cols)
+    // Wire inspector pointer into the parser so VT events are recorded
+    const sptr = getSurfacePtr(surface_handle)
+    sptr.parser.inspector_ptr = @ptrToInt(&sptr.inspector)
+    // Start IO thread now that the surface is at its final address
+    sptr.startIoThread()
+    return surface_handle
+}
+
+/// Add an editor tab. Returns the surface handle.
+export fn cotty_workspace_add_editor_tab(ws: i64) i64 {
+    return getWorkspacePtr(ws).addEditorTab()
+}
+
+/// Add a preview editor tab. Closes existing preview first. Returns the surface handle.
+export fn cotty_workspace_add_editor_tab_preview(ws: i64) i64 {
+    return getWorkspacePtr(ws).addEditorTabPreview()
+}
+
+/// Select a tab by index.
+export fn cotty_workspace_select_tab(ws: i64, index: i64) void {
+    getWorkspacePtr(ws).selectTab(index)
+}
+
+/// Close a tab. Returns the surface handle for Swift to clean up the view.
+export fn cotty_workspace_close_tab(ws: i64, index: i64) i64 {
+    return getWorkspacePtr(ws).closeTab(index)
+}
+
+/// Move a tab from one position to another.
+export fn cotty_workspace_move_tab(ws: i64, from: i64, to: i64) void {
+    getWorkspacePtr(ws).moveTab(from, to)
+}
+
+/// Pin a preview tab (make it permanent).
+export fn cotty_workspace_pin_tab(ws: i64, index: i64) void {
+    getWorkspacePtr(ws).pinTab(index)
+}
+
+/// Mark a tab as dirty. Auto-pins if preview.
+export fn cotty_workspace_mark_dirty(ws: i64, index: i64) void {
+    getWorkspacePtr(ws).markDirty(index)
+}
+
+// ---- Tab queries ----
+
+/// Return the number of tabs.
+export fn cotty_workspace_tab_count(ws: i64) i64 {
+    return getWorkspacePtr(ws).tabs.count
+}
+
+/// Return the selected tab index (-1 if none).
+export fn cotty_workspace_selected_index(ws: i64) i64 {
+    return getWorkspacePtr(ws).selected_index
+}
+
+/// Return the surface handle for tab at index.
+export fn cotty_workspace_tab_surface(ws: i64, index: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (index < 0 or index >= wptr.tabs.count) { return 0 }
+    return @ptrToInt(wptr.getTab(index).surface)
+}
+
+/// Return 1 if the tab is a terminal, 0 if editor.
+export fn cotty_workspace_tab_is_terminal(ws: i64, index: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (index < 0 or index >= wptr.tabs.count) { return 0 }
+    if (wptr.getTab(index).surface.kind == SurfaceKind.Terminal) { return 1 }
+    return 0
+}
+
+/// Return 1 if the tab is a preview tab, 0 otherwise.
+export fn cotty_workspace_tab_is_preview(ws: i64, index: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (index < 0 or index >= wptr.tabs.count) { return 0 }
+    if (wptr.getTab(index).is_preview) { return 1 }
+    return 0
+}
+
+/// Return 1 if the tab's surface is dirty, 0 otherwise.
+export fn cotty_workspace_tab_is_dirty(ws: i64, index: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (index < 0 or index >= wptr.tabs.count) { return 0 }
+    if (wptr.getTab(index).surface.dirty) { return 1 }
+    return 0
+}
+
+/// Return 1 if the tab's inspector is visible, 0 otherwise.
+export fn cotty_workspace_tab_inspector_visible(ws: i64, index: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (index < 0 or index >= wptr.tabs.count) { return 0 }
+    if (wptr.getTab(index).inspector_visible) { return 1 }
+    return 0
+}
+
+/// Set the inspector visibility for a tab.
+export fn cotty_workspace_tab_set_inspector_visible(ws: i64, index: i64, visible: i64) void {
+    const wptr = getWorkspacePtr(ws)
+    if (index < 0 or index >= wptr.tabs.count) { return }
+    wptr.getTabPtr(index).inspector_visible = visible != 0
+}
+
+/// Compute the tab title and return a pointer to the title bytes.
+export fn cotty_workspace_tab_title(ws: i64, index: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    wptr.tabTitle(index)
+    return wptr.title_buf.items
+}
+
+/// Return the length of the last computed tab title.
+export fn cotty_workspace_tab_title_len(ws: i64, index: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    return wptr.tabTitle(index)
+}
+
+/// Return the preview tab index (-1 if none).
+export fn cotty_workspace_preview_tab_index(ws: i64) i64 {
+    return getWorkspacePtr(ws).preview_tab_index
+}
+
+// ---- Workspace state ----
+
+/// Return 1 if the sidebar is visible, 0 otherwise.
+export fn cotty_workspace_sidebar_visible(ws: i64) i64 {
+    if (getWorkspacePtr(ws).sidebar_visible) { return 1 }
+    return 0
+}
+
+/// Set sidebar visibility.
+export fn cotty_workspace_set_sidebar_visible(ws: i64, visible: i64) void {
+    getWorkspacePtr(ws).setSidebarVisible(visible != 0)
+}
+
+/// Return the sidebar width.
+export fn cotty_workspace_sidebar_width(ws: i64) i64 {
+    return getWorkspacePtr(ws).sidebar_width
+}
+
+/// Set the sidebar width.
+export fn cotty_workspace_set_sidebar_width(ws: i64, width: i64) void {
+    getWorkspacePtr(ws).setSidebarWidth(width)
+}
+
+/// Return a pointer to the root URL bytes.
+export fn cotty_workspace_root_url(ws: i64) i64 {
+    return getWorkspacePtr(ws).root_url.items
+}
+
+/// Return the byte length of the root URL.
+export fn cotty_workspace_root_url_len(ws: i64) i64 {
+    return getWorkspacePtr(ws).root_url.count
+}
+
+/// Set the root URL from raw bytes.
+export fn cotty_workspace_set_root_url(ws: i64, ptr: *u8, len: i64) void {
+    getWorkspacePtr(ws).setRootUrl(ptr, len)
 }
 

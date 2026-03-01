@@ -1,0 +1,477 @@
+/// Workspace: manages tabs (surfaces) within a single window.
+/// All tab ordering, selection, preview/pin, and sidebar state lives here in Cot.
+/// Swift is a thin shell that renders state and forwards events.
+
+import "std/list"
+import "std/sys"
+import "std/string"
+import "app"
+import "surface"
+
+/// A single tab in the workspace. Each tab owns a Surface pointer.
+struct Tab {
+    surface: *Surface,
+    is_preview: bool,
+    inspector_visible: bool,
+}
+
+/// Workspace state for a single window. Owns a list of tabs and sidebar state.
+struct Workspace {
+    app: *App,
+    tabs: List(Tab),
+    selected_index: i64,
+    sidebar_visible: bool,
+    sidebar_width: i64,
+    root_url: List(u8),
+    preview_tab_index: i64,
+    title_buf: List(u8),
+
+    /// Create a new workspace with defaults.
+    static fn init(app: *App) Workspace {
+        var tabs: List(Tab) = .{}
+        var root_url: List(u8) = .{}
+        var title_buf: List(u8) = .{}
+
+        return Workspace {
+            app: app,
+            tabs: tabs,
+            selected_index: -1,
+            sidebar_visible: true,
+            sidebar_width: 220,
+            root_url: root_url,
+            preview_tab_index: -1,
+            title_buf: title_buf,
+        }
+    }
+
+    /// Add a terminal tab. Creates a terminal surface via the app, appends tab, selects it.
+    /// Returns the surface handle (pointer as i64) for Swift to create the view.
+    fn addTerminalTab(rows: i64, cols: i64) i64 {
+        const s = self.app.addTerminalSurface(rows, cols)
+        const tab = Tab {
+            surface: s,
+            is_preview: false,
+            inspector_visible: false,
+        }
+        self.tabs.append(tab)
+        self.selected_index = self.tabs.count - 1
+        return @ptrToInt(s)
+    }
+
+    /// Add an editor tab. Creates an editor surface, appends tab, selects it.
+    /// Returns the surface handle.
+    fn addEditorTab() i64 {
+        const s = self.app.addSurface()
+        const tab = Tab {
+            surface: s,
+            is_preview: false,
+            inspector_visible: false,
+        }
+        self.tabs.append(tab)
+        self.selected_index = self.tabs.count - 1
+        return @ptrToInt(s)
+    }
+
+    /// Add a preview editor tab. Closes any existing preview tab first.
+    /// Returns the surface handle.
+    fn addEditorTabPreview() i64 {
+        // Close existing preview tab if any
+        if (self.preview_tab_index >= 0 and self.preview_tab_index < self.tabs.count) {
+            self.closeTab(self.preview_tab_index)
+        }
+
+        const s = self.app.addSurface()
+        const tab = Tab {
+            surface: s,
+            is_preview: true,
+            inspector_visible: false,
+        }
+        self.tabs.append(tab)
+        self.selected_index = self.tabs.count - 1
+        self.preview_tab_index = self.tabs.count - 1
+        return @ptrToInt(s)
+    }
+
+    /// Select a tab by index (bounds-checked).
+    fn selectTab(index: i64) void {
+        if (index >= 0 and index < self.tabs.count) {
+            self.selected_index = index
+        }
+    }
+
+    /// Close a tab by index. Returns the surface handle for Swift to clean up the view.
+    /// Adjusts selected_index and preview_tab_index. Returns -1 if index is invalid.
+    fn closeTab(index: i64) i64 {
+        if (index < 0 or index >= self.tabs.count) {
+            return -1
+        }
+
+        const tab = self.tabs.get(index)
+        const surface_handle = @ptrToInt(tab.surface)
+
+        // Clear preview tracking if this was the preview tab
+        if (self.preview_tab_index == index) {
+            self.preview_tab_index = -1
+        } else if (self.preview_tab_index > index) {
+            self.preview_tab_index -= 1
+        }
+
+        self.tabs.orderedRemove(index)
+
+        // Adjust selected index
+        if (self.tabs.count == 0) {
+            self.selected_index = -1
+        } else if (self.selected_index >= self.tabs.count) {
+            self.selected_index = self.tabs.count - 1
+        } else if (self.selected_index > index) {
+            self.selected_index -= 1
+        } else if (self.selected_index == index) {
+            // Was viewing the closed tab — clamp to valid range
+            if (self.selected_index >= self.tabs.count) {
+                self.selected_index = self.tabs.count - 1
+            }
+        }
+
+        return surface_handle
+    }
+
+    /// Move a tab from one position to another. Updates selected_index to follow.
+    fn moveTab(from: i64, to: i64) void {
+        if (from < 0 or from >= self.tabs.count) { return }
+        if (to < 0 or to >= self.tabs.count) { return }
+        if (from == to) { return }
+
+        const tab = self.tabs.get(from)
+        self.tabs.orderedRemove(from)
+
+        var insert_at = to
+        if (insert_at > self.tabs.count) {
+            insert_at = self.tabs.count
+        }
+        self.tabs.insert(insert_at, tab)
+
+        // Update selected_index to follow the moved tab if it was selected
+        if (self.selected_index == from) {
+            self.selected_index = insert_at
+        } else if (from < self.selected_index and insert_at >= self.selected_index) {
+            self.selected_index -= 1
+        } else if (from > self.selected_index and insert_at <= self.selected_index) {
+            self.selected_index += 1
+        }
+
+        // Update preview_tab_index similarly
+        if (self.preview_tab_index == from) {
+            self.preview_tab_index = insert_at
+        } else if (self.preview_tab_index >= 0) {
+            if (from < self.preview_tab_index and insert_at >= self.preview_tab_index) {
+                self.preview_tab_index -= 1
+            } else if (from > self.preview_tab_index and insert_at <= self.preview_tab_index) {
+                self.preview_tab_index += 1
+            }
+        }
+    }
+
+    /// Pin a preview tab (make it permanent). Clears preview tracking.
+    fn pinTab(index: i64) void {
+        if (index < 0 or index >= self.tabs.count) { return }
+        var tab = self.getTabPtr(index)
+        tab.is_preview = false
+        if (self.preview_tab_index == index) {
+            self.preview_tab_index = -1
+        }
+    }
+
+    /// Mark a tab as dirty. If it's a preview tab, auto-pin it first.
+    fn markDirty(index: i64) void {
+        if (index < 0 or index >= self.tabs.count) { return }
+        var tab = self.getTabPtr(index)
+        if (tab.is_preview) {
+            self.pinTab(index)
+        }
+        tab.surface.dirty = true
+    }
+
+    /// Compute the title for a tab into title_buf. Returns the length.
+    fn tabTitle(index: i64) i64 {
+        if (index < 0 or index >= self.tabs.count) {
+            self.title_buf.count = 0
+            return 0
+        }
+
+        const tab = self.tabs.get(index)
+        self.title_buf.count = 0
+
+        if (tab.surface.kind == SurfaceKind.Terminal) {
+            // Use terminal title bytes
+            const title_ptr = tab.surface.terminal.title_buf
+            const title_len = tab.surface.terminal.title_len
+            if (title_len > 0) {
+                for i in 0..title_len {
+                    const b = @intToPtr(*u8, title_ptr + i).*
+                    self.title_buf.append(b)
+                }
+            } else {
+                // Default "Terminal"
+                self.title_buf.append('T')
+                self.title_buf.append('e')
+                self.title_buf.append('r')
+                self.title_buf.append('m')
+                self.title_buf.append('i')
+                self.title_buf.append('n')
+                self.title_buf.append('a')
+                self.title_buf.append('l')
+            }
+        } else {
+            // Editor: use filepath last component or "Untitled"
+            if (tab.surface.filepath) |path| {
+                // Find last '/' and take everything after it
+                var last_slash: i64 = -1
+                const path_ptr = @ptrOf(path)
+                const path_len = @lenOf(path)
+                for i in 0..path_len {
+                    if (@intToPtr(*u8, path_ptr + i).* == '/') {
+                        last_slash = i
+                    }
+                }
+                const start = last_slash + 1
+                const len = path_len - start
+                for i in 0..len {
+                    self.title_buf.append(@intToPtr(*u8, path_ptr + start + i).*)
+                }
+            } else {
+                // "Untitled"
+                self.title_buf.append('U')
+                self.title_buf.append('n')
+                self.title_buf.append('t')
+                self.title_buf.append('i')
+                self.title_buf.append('t')
+                self.title_buf.append('l')
+                self.title_buf.append('e')
+                self.title_buf.append('d')
+            }
+        }
+
+        return self.title_buf.count
+    }
+
+    /// Get the tab at an index (for queries).
+    fn getTab(index: i64) Tab {
+        return self.tabs.get(index)
+    }
+
+    /// Get a mutable pointer to the tab at an index.
+    fn getTabPtr(index: i64) *Tab {
+        return @intToPtr(*Tab, self.tabs.items + index * @sizeOf(Tab))
+    }
+
+    /// Set the root URL from raw bytes.
+    fn setRootUrl(ptr: *u8, len: i64) void {
+        self.root_url.count = 0
+        for i in 0..len {
+            const byte_ptr = @intToPtr(*u8, @ptrToInt(ptr) + i)
+            self.root_url.append(byte_ptr.*)
+        }
+    }
+
+    /// Set sidebar visibility.
+    fn setSidebarVisible(v: bool) void {
+        self.sidebar_visible = v
+    }
+
+    /// Set sidebar width.
+    fn setSidebarWidth(w: i64) void {
+        self.sidebar_width = w
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "workspace init" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    @assertEq(ws.tabs.count, 0)
+    @assertEq(ws.selected_index, -1)
+    @assertEq(ws.sidebar_visible, true)
+    @assertEq(ws.sidebar_width, 220)
+    @assertEq(ws.preview_tab_index, -1)
+}
+
+test "workspace add editor tab" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    const handle = ws.addEditorTab()
+    @assert(handle != 0)
+    @assertEq(ws.tabs.count, 1)
+    @assertEq(ws.selected_index, 0)
+    @assertEq(ws.getTab(0).is_preview, false)
+}
+
+test "workspace add multiple tabs" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.addEditorTab()
+    @assertEq(ws.tabs.count, 3)
+    @assertEq(ws.selected_index, 2)
+}
+
+test "workspace select tab" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.selectTab(0)
+    @assertEq(ws.selected_index, 0)
+    ws.selectTab(2)
+    @assertEq(ws.selected_index, 2)
+    // Out of bounds — no change
+    ws.selectTab(5)
+    @assertEq(ws.selected_index, 2)
+    ws.selectTab(-1)
+    @assertEq(ws.selected_index, 2)
+}
+
+test "workspace close tab" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.selectTab(1)
+    // Close tab 1 — selected should adjust
+    const handle = ws.closeTab(1)
+    @assert(handle != -1)
+    @assertEq(ws.tabs.count, 2)
+    @assertEq(ws.selected_index, 1)
+}
+
+test "workspace close last tab" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.closeTab(0)
+    @assertEq(ws.tabs.count, 0)
+    @assertEq(ws.selected_index, -1)
+}
+
+test "workspace close tab adjusts selected down" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.selectTab(1)
+    ws.closeTab(0)
+    @assertEq(ws.tabs.count, 1)
+    @assertEq(ws.selected_index, 0)
+}
+
+test "workspace move tab" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.addEditorTab()
+    ws.selectTab(0)
+    // Move tab 0 to position 2
+    ws.moveTab(0, 2)
+    @assertEq(ws.selected_index, 2)
+    @assertEq(ws.tabs.count, 3)
+}
+
+test "workspace preview tab" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    const preview_handle = ws.addEditorTabPreview()
+    @assert(preview_handle != 0)
+    @assertEq(ws.tabs.count, 2)
+    @assertEq(ws.preview_tab_index, 1)
+    @assertEq(ws.getTab(1).is_preview, true)
+}
+
+test "workspace pin preview tab" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTabPreview()
+    @assertEq(ws.preview_tab_index, 1)
+    ws.pinTab(1)
+    @assertEq(ws.preview_tab_index, -1)
+    @assertEq(ws.getTab(1).is_preview, false)
+}
+
+test "workspace mark dirty auto-pins preview" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTabPreview()
+    @assertEq(ws.getTab(0).is_preview, true)
+    @assertEq(ws.preview_tab_index, 0)
+    ws.markDirty(0)
+    @assertEq(ws.getTab(0).is_preview, false)
+    @assertEq(ws.preview_tab_index, -1)
+    @assertEq(ws.getTab(0).surface.dirty, true)
+}
+
+test "workspace add preview replaces existing preview" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTabPreview()
+    @assertEq(ws.tabs.count, 2)
+    // Adding another preview should close the old one
+    ws.addEditorTabPreview()
+    @assertEq(ws.tabs.count, 2)
+    @assertEq(ws.preview_tab_index, 1)
+}
+
+test "workspace editor tab title" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    const len = ws.tabTitle(0)
+    @assertEq(len, 8)  // "Untitled"
+}
+
+test "workspace editor tab title with filepath" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.getTabPtr(0).surface.filepath = "/foo/bar/hello.cot"
+    const len = ws.tabTitle(0)
+    @assertEq(len, 9)  // "hello.cot"
+}
+
+test "workspace sidebar state" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    @assertEq(ws.sidebar_visible, true)
+    ws.setSidebarVisible(false)
+    @assertEq(ws.sidebar_visible, false)
+    ws.setSidebarWidth(300)
+    @assertEq(ws.sidebar_width, 300)
+}
+
+test "workspace close preview adjusts tracking" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    ws.addEditorTabPreview()
+    ws.addEditorTab()
+    @assertEq(ws.preview_tab_index, 1)
+    // Close tab 0 — preview index should shift down
+    ws.closeTab(0)
+    @assertEq(ws.preview_tab_index, 0)
+}
+
+test "workspace inspector visibility" {
+    var app = App.init()
+    var ws = Workspace.init(&app)
+    ws.addEditorTab()
+    @assertEq(ws.getTab(0).inspector_visible, false)
+    ws.getTabPtr(0).inspector_visible = true
+    @assertEq(ws.getTab(0).inspector_visible, true)
+}
