@@ -7,7 +7,6 @@ import "std/sys"
 import "std/string"
 import "app"
 import "surface"
-
 /// A single tab in the workspace. Each tab owns a Surface pointer.
 struct Tab {
     surface: *Surface,
@@ -282,6 +281,7 @@ struct Workspace {
     fn setSidebarWidth(w: i64) void {
         self.sidebar_width = w
     }
+
 }
 
 // ============================================================================

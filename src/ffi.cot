@@ -17,12 +17,23 @@ import "config"
 import "inspector"
 import "workspace"
 import "file_tree"
+import "command_palette"
+import "split"
 
 // ============================================================================
 // Globals
 // ============================================================================
 
 var g_app: App = undefined
+var g_palette: CommandPalette = undefined
+
+/// Split tree storage — kept outside Tab struct to avoid memory layout issues.
+/// Fixed-size parallel arrays: g_split_handles[i] is the tab's primary surface handle,
+/// g_split_trees[i] is a heap-allocated *SplitTree pointer (as i64).
+const MAX_SPLIT_TABS: i64 = 64
+var g_split_handles: [64]i64 = undefined
+var g_split_trees: [64]i64 = undefined
+var g_split_count: i64 = 0
 
 /// Action queue — one pending action, read by Swift after each call.
 var g_action_tag: i64 = 0
@@ -45,6 +56,54 @@ fn getSurfacePtr(handle: i64) *Surface {
     return @intToPtr(*Surface, handle)
 }
 
+/// Find or create a split tree for the given tab surface handle.
+/// Returns a mutable pointer to the heap-allocated SplitTree.
+fn findOrCreateSplitTree(tab_handle: i64) *SplitTree {
+    for i in 0..g_split_count {
+        if (g_split_handles[i] == tab_handle) {
+            return @intToPtr(*SplitTree, g_split_trees[i])
+        }
+    }
+    // Allocate new SplitTree on the heap
+    if (g_split_count >= MAX_SPLIT_TABS) {
+        return @intToPtr(*SplitTree, 0)
+    }
+    var tree = SplitTree.initWithSurface(tab_handle)
+    const ptr = alloc(0, @sizeOf(SplitTree))
+    const dst = @intToPtr(*SplitTree, ptr)
+    dst.* = tree
+    g_split_handles[g_split_count] = tab_handle
+    g_split_trees[g_split_count] = ptr
+    g_split_count += 1
+    return dst
+}
+
+/// Remove the split tree associated with a tab surface handle.
+fn removeSplitTree(tab_handle: i64) void {
+    for i in 0..g_split_count {
+        if (g_split_handles[i] == tab_handle) {
+            // Shift remaining entries down
+            var j = i
+            while (j < g_split_count - 1) {
+                g_split_handles[j] = g_split_handles[j + 1]
+                g_split_trees[j] = g_split_trees[j + 1]
+                j += 1
+            }
+            g_split_count -= 1
+            return
+        }
+    }
+}
+
+/// Get the split tree for the currently selected tab in a workspace.
+fn currentSplitTreeForWs(wptr: *Workspace) *SplitTree {
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) {
+        return @intToPtr(*SplitTree, 0)
+    }
+    const tab_handle = @ptrToInt(wptr.tabs.get(wptr.selected_index).surface)
+    return findOrCreateSplitTree(tab_handle)
+}
+
 // ============================================================================
 // App lifecycle
 // ============================================================================
@@ -57,6 +116,23 @@ export fn cotty_app_new() i64 {
         g_app.config = Config.loadFromFile(path)
     }
     initThemeDefaults(g_app.config)
+
+    // Init command palette with default actions
+    g_palette = CommandPalette.init()
+    g_palette.addAction("New Window", 1)
+    g_palette.addAction("New Terminal", 2)
+    g_palette.addAction("New Editor", 3)
+    g_palette.addAction("Toggle Sidebar", 4)
+    g_palette.addAction("Toggle Inspector", 5)
+    g_palette.addAction("Reload Config", 6)
+    g_palette.addAction("Increase Font Size", 7)
+    g_palette.addAction("Decrease Font Size", 8)
+    g_palette.addAction("Reset Font Size", 9)
+    g_palette.addAction("Close Tab", 10)
+
+    // Init split tree storage
+    g_split_count = 0
+
     return @ptrToInt(&g_app)
 }
 
@@ -692,6 +768,20 @@ export fn cotty_config_sel_fg_b() i64 {
     return g_app.config.sel_fg_b
 }
 
+/// Set the font size. Clamped to 6–72.
+export fn cotty_config_set_font_size(size: i64) void {
+    var s = size
+    if (s < 6) { s = 6 }
+    if (s > 72) { s = 72 }
+    g_app.config.font_size = s
+}
+
+/// Reload config from disk. Re-reads ~/.config/cotty/config.json and updates globals.
+export fn cotty_config_reload() void {
+    g_app.config = Config.loadFromFile(configPath())
+    initThemeDefaults(&g_app.config)
+}
+
 // ============================================================================
 // Mouse tracking
 // ============================================================================
@@ -1014,17 +1104,23 @@ export fn cotty_workspace_add_terminal_tab(ws: i64, rows: i64, cols: i64) i64 {
     sptr.parser.inspector_ptr = @ptrToInt(&sptr.inspector)
     // Start IO thread now that the surface is at its final address
     sptr.startIoThread()
+    // Create split tree for this tab
+    findOrCreateSplitTree(surface_handle)
     return surface_handle
 }
 
 /// Add an editor tab. Returns the surface handle.
 export fn cotty_workspace_add_editor_tab(ws: i64) i64 {
-    return getWorkspacePtr(ws).addEditorTab()
+    const handle = getWorkspacePtr(ws).addEditorTab()
+    findOrCreateSplitTree(handle)
+    return handle
 }
 
 /// Add a preview editor tab. Closes existing preview first. Returns the surface handle.
 export fn cotty_workspace_add_editor_tab_preview(ws: i64) i64 {
-    return getWorkspacePtr(ws).addEditorTabPreview()
+    const handle = getWorkspacePtr(ws).addEditorTabPreview()
+    findOrCreateSplitTree(handle)
+    return handle
 }
 
 /// Select a tab by index.
@@ -1034,7 +1130,13 @@ export fn cotty_workspace_select_tab(ws: i64, index: i64) void {
 
 /// Close a tab. Returns the surface handle for Swift to clean up the view.
 export fn cotty_workspace_close_tab(ws: i64, index: i64) i64 {
-    return getWorkspacePtr(ws).closeTab(index)
+    const wptr = getWorkspacePtr(ws)
+    // Clean up split tree before closing
+    if (index >= 0 and index < wptr.tabs.count) {
+        const tab_handle = @ptrToInt(wptr.tabs.get(index).surface)
+        removeSplitTree(tab_handle)
+    }
+    return wptr.closeTab(index)
 }
 
 /// Move a tab from one position to another.
@@ -1164,6 +1266,193 @@ export fn cotty_workspace_root_url_len(ws: i64) i64 {
 /// Set the root URL from raw bytes.
 export fn cotty_workspace_set_root_url(ws: i64, ptr: *u8, len: i64) void {
     getWorkspacePtr(ws).setRootUrl(ptr, len)
+}
+
+// ============================================================================
+// Split Panes (tree storage is in FFI globals, not in Tab struct)
+// ============================================================================
+
+/// Split the current tab's focused pane. Returns the new surface handle.
+/// direction: 1=horizontal (left/right), 2=vertical (top/bottom).
+export fn cotty_workspace_split(ws: i64, direction: i64, rows: i64, cols: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return -1 }
+    const tab_handle = @ptrToInt(wptr.tabs.get(wptr.selected_index).surface)
+    const tree = findOrCreateSplitTree(tab_handle)
+    // Create new terminal surface
+    const new_surface = wptr.app.addTerminalSurface(rows, cols)
+    const new_handle = @ptrToInt(new_surface)
+    tree.split(direction, new_handle)
+    // Wire inspector + start IO thread (same as addTerminalTab)
+    const sptr = getSurfacePtr(new_handle)
+    sptr.parser.inspector_ptr = @ptrToInt(&sptr.inspector)
+    sptr.startIoThread()
+    return new_handle
+}
+
+/// Close the focused split pane. Returns the closed surface handle.
+/// Returns -1 if only one pane (caller should close the tab instead).
+export fn cotty_workspace_close_split(ws: i64) i64 {
+    const tree = currentSplitTreeForWs(getWorkspacePtr(ws))
+    return tree.closeFocused()
+}
+
+/// Move focus between split panes.
+/// direction: 1=right, 2=down, 3=left, 4=up.
+export fn cotty_workspace_split_move_focus(ws: i64, direction: i64) void {
+    currentSplitTreeForWs(getWorkspacePtr(ws)).moveFocus(direction)
+}
+
+/// Set the ratio for a split node in the current tab.
+export fn cotty_workspace_split_set_ratio(ws: i64, node_idx: i64, ratio: i64) void {
+    currentSplitTreeForWs(getWorkspacePtr(ws)).setRatio(node_idx, ratio)
+}
+
+/// Return 1 if the current tab has split panes, 0 otherwise.
+export fn cotty_workspace_is_split(ws: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    if (currentSplitTreeForWs(wptr).leafCount() > 1) { return 1 }
+    return 0
+}
+
+/// Return the focused surface handle in the current tab.
+export fn cotty_workspace_focused_surface(ws: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    const tree = currentSplitTreeForWs(wptr)
+    const focused = tree.focused
+    if (focused < 0 or focused >= tree.nodes.count) { return 0 }
+    return tree.getNode(focused).surface_handle
+}
+
+// ---- Split tree queries (for Swift layout) ----
+
+/// Return the split tree node count for the current tab.
+export fn cotty_workspace_split_node_count(ws: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    return currentSplitTreeForWs(wptr).nodeCount()
+}
+
+/// Return 1 if the node at index is a leaf.
+export fn cotty_workspace_split_node_is_leaf(ws: i64, idx: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 1 }
+    if (currentSplitTreeForWs(wptr).getNode(idx).is_leaf) { return 1 }
+    return 0
+}
+
+/// Return the surface handle of a leaf node.
+export fn cotty_workspace_split_node_surface(ws: i64, idx: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    return currentSplitTreeForWs(wptr).getNode(idx).surface_handle
+}
+
+/// Return the direction of a split node (1=horizontal, 2=vertical).
+export fn cotty_workspace_split_node_direction(ws: i64, idx: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    return currentSplitTreeForWs(wptr).getNode(idx).direction
+}
+
+/// Return the ratio of a split node (0–1000).
+export fn cotty_workspace_split_node_ratio(ws: i64, idx: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 500 }
+    return currentSplitTreeForWs(wptr).getNode(idx).ratio
+}
+
+/// Return the left child index of a split node.
+export fn cotty_workspace_split_node_left(ws: i64, idx: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return -1 }
+    return currentSplitTreeForWs(wptr).getNode(idx).left
+}
+
+/// Return the right child index of a split node.
+export fn cotty_workspace_split_node_right(ws: i64, idx: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return -1 }
+    return currentSplitTreeForWs(wptr).getNode(idx).right
+}
+
+/// Return the root node index of the split tree.
+export fn cotty_workspace_split_root(ws: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    return currentSplitTreeForWs(wptr).root
+}
+
+/// Return the focused node index of the split tree.
+export fn cotty_workspace_split_focused(ws: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    return currentSplitTreeForWs(wptr).focused
+}
+
+// ============================================================================
+// Command Palette
+// ============================================================================
+
+/// Toggle the command palette open/closed.
+export fn cotty_palette_toggle() void {
+    g_palette.toggle()
+}
+
+/// Return 1 if the palette is active, 0 otherwise.
+export fn cotty_palette_active() i64 {
+    if (g_palette.active) { return 1 }
+    return 0
+}
+
+/// Dismiss the palette.
+export fn cotty_palette_dismiss() void {
+    g_palette.dismiss()
+}
+
+/// Set the query string from raw bytes and re-filter.
+export fn cotty_palette_set_query(ptr: *u8, len: i64) void {
+    g_palette.setQuery(ptr, len)
+}
+
+/// Return the number of filtered results.
+export fn cotty_palette_result_count() i64 {
+    return g_palette.resultCount()
+}
+
+/// Return a pointer to the title bytes of the result at index.
+export fn cotty_palette_result_title(index: i64) i64 {
+    const action = g_palette.resultAction(index)
+    return action.title_ptr
+}
+
+/// Return the byte length of the title at index.
+export fn cotty_palette_result_title_len(index: i64) i64 {
+    const action = g_palette.resultAction(index)
+    return action.title_len
+}
+
+/// Return the action tag of the result at index.
+export fn cotty_palette_result_tag(index: i64) i64 {
+    const action = g_palette.resultAction(index)
+    return action.tag
+}
+
+/// Return the currently selected index.
+export fn cotty_palette_selected() i64 {
+    return g_palette.selected
+}
+
+/// Move selection up.
+export fn cotty_palette_move_up() void {
+    g_palette.moveUp()
+}
+
+/// Move selection down.
+export fn cotty_palette_move_down() void {
+    g_palette.moveDown()
 }
 
 // ============================================================================

@@ -1,0 +1,206 @@
+/// Command palette: action registry + substring matching.
+/// All logic lives in Cot. Swift only renders the overlay and forwards keystrokes.
+
+import "std/list"
+import "std/sys"
+import "std/string"
+
+/// A single action in the palette.
+struct PaletteAction {
+    title_ptr: i64,
+    title_len: i64,
+    tag: i64,
+}
+
+/// Command palette state. Owns a list of actions, a query buffer,
+/// filtered indices list, and active/selection state.
+struct CommandPalette {
+    actions: List(PaletteAction),
+    filtered: List(i64),
+    query: List(u8),
+    active: bool,
+    selected: i64,
+
+    static fn init() CommandPalette {
+        var actions: List(PaletteAction) = .{}
+        var filtered: List(i64) = .{}
+        var query: List(u8) = .{}
+
+        return CommandPalette {
+            actions: actions,
+            filtered: filtered,
+            query: query,
+            active: false,
+            selected: 0,
+        }
+    }
+
+    /// Register an action with a string title and integer tag.
+    fn addAction(title: string, tag: i64) void {
+        const action = PaletteAction {
+            title_ptr: @ptrOf(title),
+            title_len: @lenOf(title),
+            tag: tag,
+        }
+        self.actions.append(action)
+    }
+
+    /// Toggle the palette open/closed.
+    fn toggle() void {
+        if (self.active) {
+            self.dismiss()
+        } else {
+            self.active = true
+            self.query.count = 0
+            self.selected = 0
+            self.filter()
+        }
+    }
+
+    /// Dismiss the palette.
+    fn dismiss() void {
+        self.active = false
+        self.query.count = 0
+        self.selected = 0
+    }
+
+    /// Set the query from raw bytes and re-filter.
+    fn setQuery(ptr: *u8, len: i64) void {
+        self.query.count = 0
+        for i in 0..len {
+            const b = @intToPtr(*u8, @ptrToInt(ptr) + i).*
+            self.query.append(b)
+        }
+        self.selected = 0
+        self.filter()
+    }
+
+    /// Filter actions by case-insensitive substring match against query.
+    fn filter() void {
+        self.filtered.count = 0
+
+        if (self.query.count == 0) {
+            // Empty query = show all actions
+            for i in 0..self.actions.count {
+                self.filtered.append(i)
+            }
+            return
+        }
+
+        for i in 0..self.actions.count {
+            const action = self.actions.get(i)
+            if (substringMatch(action.title_ptr, action.title_len, self.query.items, self.query.count)) {
+                self.filtered.append(i)
+            }
+        }
+    }
+
+    /// Return the number of filtered results.
+    fn resultCount() i64 {
+        return self.filtered.count
+    }
+
+    /// Return the action at the given filtered index.
+    fn resultAction(index: i64) PaletteAction {
+        if (index < 0 or index >= self.filtered.count) {
+            return PaletteAction { title_ptr: 0, title_len: 0, tag: 0 }
+        }
+        const action_idx = self.filtered.get(index)
+        return self.actions.get(action_idx)
+    }
+
+    /// Move selection up.
+    fn moveUp() void {
+        if (self.selected > 0) {
+            self.selected -= 1
+        }
+    }
+
+    /// Move selection down.
+    fn moveDown() void {
+        if (self.selected < self.filtered.count - 1) {
+            self.selected += 1
+        }
+    }
+}
+
+/// Case-insensitive substring match: does needle appear in haystack?
+fn substringMatch(hay_ptr: i64, hay_len: i64, needle_ptr: i64, needle_len: i64) bool {
+    if (needle_len == 0) { return true }
+    if (needle_len > hay_len) { return false }
+
+    const limit = hay_len - needle_len + 1
+    for i in 0..limit {
+        var matched = true
+        for j in 0..needle_len {
+            const hc = asciiToLower(@intToPtr(*u8, hay_ptr + i + j).*)
+            const nc = asciiToLower(@intToPtr(*u8, needle_ptr + j).*)
+            if (hc != nc) {
+                matched = false
+                break
+            }
+        }
+        if (matched) { return true }
+    }
+    return false
+}
+
+/// Convert ASCII uppercase to lowercase. Returns i64 for Cot compatibility.
+fn asciiToLower(c: i64) i64 {
+    if (c >= 'A' and c <= 'Z') {
+        return c + 32
+    }
+    return c
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "command palette init" {
+    var cp = CommandPalette.init()
+    @assertEq(cp.active, false)
+    @assertEq(cp.actions.count, 0)
+    @assertEq(cp.filtered.count, 0)
+}
+
+test "command palette toggle" {
+    var cp = CommandPalette.init()
+    cp.addAction("New Window", 1)
+    cp.addAction("New Terminal", 2)
+    cp.toggle()
+    @assertEq(cp.active, true)
+    @assertEq(cp.filtered.count, 2)
+    cp.toggle()
+    @assertEq(cp.active, false)
+}
+
+test "command palette filter" {
+    var cp = CommandPalette.init()
+    cp.addAction("New Window", 1)
+    cp.addAction("New Terminal", 2)
+    cp.addAction("Toggle Inspector", 3)
+    cp.active = true
+    cp.query.count = 0
+    cp.filter()
+    @assertEq(cp.filtered.count, 3)
+}
+
+test "substring match case insensitive" {
+    const hay = "New Terminal"
+    const needle = "term"
+    @assertEq(substringMatch(@ptrOf(hay), @lenOf(hay), @ptrOf(needle), @lenOf(needle)), true)
+}
+
+test "substring match no match" {
+    const hay = "New Window"
+    const needle = "term"
+    @assertEq(substringMatch(@ptrOf(hay), @lenOf(hay), @ptrOf(needle), @lenOf(needle)), false)
+}
+
+test "asciiToLower" {
+    @assertEq(asciiToLower('A'), 'a')
+    @assertEq(asciiToLower('Z'), 'z')
+    @assertEq(asciiToLower('a'), 'a')
+    @assertEq(asciiToLower('1'), '1')
+}

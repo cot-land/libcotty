@@ -1,0 +1,338 @@
+/// Binary split tree for pane management (flat node array, not recursive enum).
+/// Each node is either a leaf (holds a surface handle) or a split (left/right children).
+/// Modeled on Ghostty's split tree pattern, but using flat indices into a List.
+
+import "std/list"
+import "std/sys"
+
+/// Split direction.
+const SPLIT_HORIZONTAL: i64 = 1  // left/right
+const SPLIT_VERTICAL: i64 = 2    // top/bottom
+
+/// A single node in the split tree.
+struct SplitNode {
+    is_leaf: bool,
+    surface_handle: i64,
+    direction: i64,
+    ratio: i64,        // 0–1000 milliratio (500 = 50%)
+    left: i64,         // child index (or -1)
+    right: i64,        // child index (or -1)
+    parent: i64,       // parent index (or -1)
+}
+
+/// Binary split tree. Owns a flat list of nodes.
+struct SplitTree {
+    nodes: List(SplitNode),
+    root: i64,
+    focused: i64,
+
+    /// Create a single-leaf tree for a surface handle.
+    static fn initWithSurface(handle: i64) SplitTree {
+        var nodes: List(SplitNode) = .{}
+        const leaf = SplitNode {
+            is_leaf: true,
+            surface_handle: handle,
+            direction: 0,
+            ratio: 500,
+            left: -1,
+            right: -1,
+            parent: -1,
+        }
+        nodes.append(leaf)
+        return SplitTree {
+            nodes: nodes,
+            root: 0,
+            focused: 0,
+        }
+    }
+
+    /// Return the number of nodes.
+    fn nodeCount() i64 {
+        return self.nodes.count
+    }
+
+    /// Get a node by index.
+    fn getNode(idx: i64) SplitNode {
+        return self.nodes.get(idx)
+    }
+
+    /// Get a mutable pointer to a node by index.
+    fn getNodePtr(idx: i64) *SplitNode {
+        return @intToPtr(*SplitNode, self.nodes.items + idx * @sizeOf(SplitNode))
+    }
+
+    /// Count the number of leaf nodes.
+    fn leafCount() i64 {
+        var count: i64 = 0
+        for i in 0..self.nodes.count {
+            if (self.nodes.get(i).is_leaf) {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// Find the leftmost (first) leaf in the subtree rooted at idx.
+    fn firstLeaf(idx: i64) i64 {
+        if (idx < 0 or idx >= self.nodes.count) { return -1 }
+        const node = self.nodes.get(idx)
+        if (node.is_leaf) { return idx }
+        return self.firstLeaf(node.left)
+    }
+
+    /// Split the focused leaf. Converts it into a split node with:
+    ///   - left child = old content (original surface)
+    ///   - right child = new terminal (new_handle)
+    /// Returns the index of the new leaf (right child).
+    fn split(direction: i64, new_handle: i64) i64 {
+        if (self.focused < 0 or self.focused >= self.nodes.count) { return -1 }
+        const focused_node = self.nodes.get(self.focused)
+        if (!focused_node.is_leaf) { return -1 }
+
+        const old_handle = focused_node.surface_handle
+        const parent_idx = self.focused
+
+        // Create left child (old content)
+        const left_child = SplitNode {
+            is_leaf: true,
+            surface_handle: old_handle,
+            direction: 0,
+            ratio: 500,
+            left: -1,
+            right: -1,
+            parent: parent_idx,
+        }
+        self.nodes.append(left_child)
+        const left_idx = self.nodes.count - 1
+
+        // Create right child (new terminal)
+        const right_child = SplitNode {
+            is_leaf: true,
+            surface_handle: new_handle,
+            direction: 0,
+            ratio: 500,
+            left: -1,
+            right: -1,
+            parent: parent_idx,
+        }
+        self.nodes.append(right_child)
+        const right_idx = self.nodes.count - 1
+
+        // Convert focused leaf into a split node
+        const split_node = self.getNodePtr(parent_idx)
+        split_node.is_leaf = false
+        split_node.surface_handle = 0
+        split_node.direction = direction
+        split_node.ratio = 500
+        split_node.left = left_idx
+        split_node.right = right_idx
+
+        // Focus the new terminal
+        self.focused = right_idx
+        return right_idx
+    }
+
+    /// Close the focused leaf. Promotes sibling to parent's slot.
+    /// Returns the closed surface handle, or -1 if can't close.
+    fn closeFocused() i64 {
+        if (self.focused < 0 or self.focused >= self.nodes.count) { return -1 }
+        const node = self.nodes.get(self.focused)
+        if (!node.is_leaf) { return -1 }
+
+        const closed_handle = node.surface_handle
+
+        // If this is the root and only leaf, can't close (caller should close tab)
+        const parent_idx = node.parent
+        if (parent_idx < 0) { return -1 }
+
+        // Find sibling
+        const parent = self.nodes.get(parent_idx)
+        var sibling_idx: i64 = -1
+        if (parent.left == self.focused) {
+            sibling_idx = parent.right
+        } else {
+            sibling_idx = parent.left
+        }
+
+        if (sibling_idx < 0) { return -1 }
+
+        // Copy sibling data into parent slot (promote sibling)
+        const sibling = self.nodes.get(sibling_idx)
+        const pptr = self.getNodePtr(parent_idx)
+        pptr.is_leaf = sibling.is_leaf
+        pptr.surface_handle = sibling.surface_handle
+        pptr.direction = sibling.direction
+        pptr.ratio = sibling.ratio
+        pptr.left = sibling.left
+        pptr.right = sibling.right
+
+        // Update children's parent pointers if sibling was a split
+        if (!sibling.is_leaf) {
+            if (sibling.left >= 0 and sibling.left < self.nodes.count) {
+                self.getNodePtr(sibling.left).parent = parent_idx
+            }
+            if (sibling.right >= 0 and sibling.right < self.nodes.count) {
+                self.getNodePtr(sibling.right).parent = parent_idx
+            }
+        }
+
+        // Focus the first leaf in the promoted subtree
+        self.focused = self.firstLeaf(parent_idx)
+
+        return closed_handle
+    }
+
+    /// Move focus to the next leaf in the given direction.
+    /// direction: 1=right, 2=down, 3=left, 4=up
+    fn moveFocus(dir: i64) void {
+        // Simple approach: collect all leaves and cycle through them
+        var leaves: List(i64) = .{}
+        self.collectLeaves(self.root, &leaves)
+
+        if (leaves.count <= 1) {
+            leaves.free()
+            return
+        }
+
+        // Find current focused index in leaves list
+        var current: i64 = -1
+        for i in 0..leaves.count {
+            if (leaves.get(i) == self.focused) {
+                current = i
+                break
+            }
+        }
+
+        if (current < 0) {
+            leaves.free()
+            return
+        }
+
+        // For now, right/down = next, left/up = prev
+        if (dir == 1 or dir == 2) {
+            self.focused = leaves.get((current + 1) % leaves.count)
+        } else {
+            self.focused = leaves.get((current - 1 + leaves.count) % leaves.count)
+        }
+
+        leaves.free()
+    }
+
+    /// Collect all leaf node indices in order (left-to-right DFS).
+    fn collectLeaves(idx: i64, out: *List(i64)) void {
+        if (idx < 0 or idx >= self.nodes.count) { return }
+        const node = self.nodes.get(idx)
+        if (node.is_leaf) {
+            out.append(idx)
+            return
+        }
+        self.collectLeaves(node.left, out)
+        self.collectLeaves(node.right, out)
+    }
+
+    /// Set the split ratio for a node. Clamped to 100–900.
+    fn setRatio(idx: i64, ratio: i64) void {
+        if (idx < 0 or idx >= self.nodes.count) { return }
+        var r = ratio
+        if (r < 100) { r = 100 }
+        if (r > 900) { r = 900 }
+        self.getNodePtr(idx).ratio = r
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "split tree single leaf" {
+    var tree = SplitTree.initWithSurface(42)
+    @assertEq(tree.nodeCount(), 1)
+    @assertEq(tree.leafCount(), 1)
+    @assertEq(tree.root, 0)
+    @assertEq(tree.focused, 0)
+    @assertEq(tree.getNode(0).is_leaf, true)
+    @assertEq(tree.getNode(0).surface_handle, 42)
+}
+
+test "split tree split horizontal" {
+    var tree = SplitTree.initWithSurface(42)
+    const new_idx = tree.split(SPLIT_HORIZONTAL, 99)
+    @assertEq(tree.nodeCount(), 3)
+    @assertEq(tree.leafCount(), 2)
+
+    // Root is now a split
+    @assertEq(tree.getNode(0).is_leaf, false)
+    @assertEq(tree.getNode(0).direction, SPLIT_HORIZONTAL)
+
+    // Left child has original surface
+    const left = tree.getNode(tree.getNode(0).left)
+    @assertEq(left.is_leaf, true)
+    @assertEq(left.surface_handle, 42)
+
+    // Right child has new surface
+    const right = tree.getNode(tree.getNode(0).right)
+    @assertEq(right.is_leaf, true)
+    @assertEq(right.surface_handle, 99)
+
+    // Focus is on the new leaf
+    @assertEq(tree.focused, new_idx)
+}
+
+test "split tree close focused" {
+    var tree = SplitTree.initWithSurface(42)
+    tree.split(SPLIT_HORIZONTAL, 99)
+
+    // Close the focused leaf (99)
+    const closed = tree.closeFocused()
+    @assertEq(closed, 99)
+
+    // Root should now be a leaf with original surface
+    @assertEq(tree.getNode(0).is_leaf, true)
+    @assertEq(tree.getNode(0).surface_handle, 42)
+    @assertEq(tree.focused, 0)
+}
+
+test "split tree close only leaf returns -1" {
+    var tree = SplitTree.initWithSurface(42)
+    const closed = tree.closeFocused()
+    @assertEq(closed, -1)
+}
+
+test "split tree move focus" {
+    var tree = SplitTree.initWithSurface(42)
+    tree.split(SPLIT_HORIZONTAL, 99)
+
+    // Currently focused on 99 (right child)
+    @assertEq(tree.getNode(tree.focused).surface_handle, 99)
+
+    // Move left
+    tree.moveFocus(3)
+    @assertEq(tree.getNode(tree.focused).surface_handle, 42)
+
+    // Move right
+    tree.moveFocus(1)
+    @assertEq(tree.getNode(tree.focused).surface_handle, 99)
+}
+
+test "split tree set ratio" {
+    var tree = SplitTree.initWithSurface(42)
+    tree.split(SPLIT_HORIZONTAL, 99)
+    tree.setRatio(0, 300)
+    @assertEq(tree.getNode(0).ratio, 300)
+
+    // Clamp low
+    tree.setRatio(0, 50)
+    @assertEq(tree.getNode(0).ratio, 100)
+
+    // Clamp high
+    tree.setRatio(0, 950)
+    @assertEq(tree.getNode(0).ratio, 900)
+}
+
+test "split tree first leaf" {
+    var tree = SplitTree.initWithSurface(42)
+    tree.split(SPLIT_HORIZONTAL, 99)
+    @assertEq(tree.firstLeaf(0), 1)  // left child
+    @assertEq(tree.firstLeaf(1), 1)  // leaf itself
+    @assertEq(tree.firstLeaf(2), 2)  // leaf itself
+}
