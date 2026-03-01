@@ -227,7 +227,7 @@ libcotty: `vt_parser.cot` dispatchOsc()
 - [x] OSC 7 — current working directory
 
 **Missing:**
-- [ ] OSC 1 — set icon name (separate from title)
+- [x] OSC 1 — set icon name (separate from title, maps to setIconTitle)
 - [x] OSC 4 — set/query color palette entry
 - [ ] OSC 8 — hyperlinks (id + URI)
 - [ ] OSC 9 — desktop notification (iTerm2)
@@ -329,6 +329,22 @@ libcotty: `terminal.cot` decSpecialMap(), `vt_parser.cot`
 - [x] G2/G3 designation (`*` / `+` intermediates)
 - [x] SS2/SS3 single shifts
 - [x] Locking shifts (LS2, LS3, LS1R, LS2R, LS3R)
+
+### 2.8 Rendering Correctness
+
+Ghostty ref: `src/renderer/generic.zig`, `src/terminal/Style.zig`
+libcotty: rendering in Swift `MetalRenderer.swift` (platform binding layer)
+
+- [x] CELL_INVERSE: resolve fg/bg to RGB first, then swap (Ghostty generic.zig:2827-2873)
+- [x] CELL_DIM: alpha-based faint (50% opacity) instead of RGB halving (Ghostty faint_opacity)
+- [x] Bold-as-bright: palette indices 0-7 shift to 8-15 when bold (Ghostty style.zig:145-189)
+- [x] Dynamic scale factor: rebuild glyph atlas on display change via viewDidChangeBackingProperties
+- [x] Inverse cells force opaque background rendering (even when original bg was COLOR_NONE)
+- [ ] Underline rendering (single, double, curly, dotted, dashed)
+- [ ] Strikethrough rendering
+- [ ] Overline rendering
+- [ ] Italic font variant (slant or separate font)
+- [ ] Bold font variant (weight or separate font)
 
 ---
 
@@ -438,7 +454,7 @@ libcotty: `config.cot` (397 lines — basic JSON)
 - [x] 16-color ANSI palette
 - [x] Load from JSON file
 - [ ] TOML or key=value config format (match Ghostty format)
-- [ ] Config reload without restart
+- [x] Config reload without restart (Cmd+, via cotty_config_reload FFI)
 - [ ] Per-surface configuration overrides
 - [ ] Config validation with error messages
 - [ ] CLI flag overrides
@@ -530,15 +546,97 @@ libcotty: basic UTF-8 decode in `vt_parser.cot`
 
 ---
 
+## Phase 6 — App UI Features
+
+**Goal**: Full-featured terminal app with modern IDE-style UI.
+
+Ghostty ref: `src/apprt/`, Zed ref: `crates/workspace/`
+libcotty: `workspace.cot`, `split.cot`, `file_tree.cot`, `command_palette.cot`, `theme_palette.cot`, `inspector.cot`
+
+### 6.1 Tabs
+
+- [x] Tab data structure in Cot (workspace.cot)
+- [x] Add/close/select tabs via FFI
+- [x] Chrome-style pill-shaped tab bar (TabBarView.swift)
+- [x] Tab title from OSC 0/2
+- [x] Cmd+1–9 tab switching with shortcut labels
+- [x] Cmd+T new terminal tab, Cmd+W close tab
+- [ ] Drag-to-reorder tabs
+- [ ] Tab overflow scrolling
+- [ ] Detach tab to new window
+
+### 6.2 Split Panes
+
+- [x] Binary split tree in Cot (split.cot)
+- [x] Horizontal and vertical splits
+- [x] Recursive NSSplitView builder (SplitContainerView.swift)
+- [x] Cmd+D split down, Cmd+R split right
+- [x] Cmd+arrow focus navigation between panes
+- [x] Divider drag to resize ratio
+- [x] Close split pane
+- [ ] Equalize split sizes
+- [ ] Swap pane positions
+
+### 6.3 File Tree Sidebar
+
+- [x] Directory listing with expand/collapse in Cot (file_tree.cot)
+- [x] Case-insensitive sorting (directories first)
+- [x] Custom-drawn NSView (Zed-style, FileTreeView.swift)
+- [x] Auto-populate from OSC 7 PWD
+- [ ] File icons by extension
+- [ ] Drag-and-drop file opening
+- [ ] Rename/delete/new file operations
+
+### 6.4 Command Palette
+
+- [x] Action registry with substring filtering in Cot (command_palette.cot)
+- [x] Overlay UI (CommandPaletteView.swift)
+- [x] Cmd+P toggle
+- [ ] Fuzzy matching
+- [ ] Recently-used ordering
+
+### 6.5 Theme Selector
+
+- [x] Theme palette with built-in themes in Cot (theme_palette.cot)
+- [x] Overlay UI with search (ThemeSelectorView.swift)
+- [x] Live theme application via FFI
+- [ ] Custom theme file loading
+- [ ] Light/dark auto-switch based on system appearance
+
+### 6.6 Inspector
+
+- [x] Per-surface diagnostic panel in Cot (inspector.cot)
+- [x] 4 tabbed panels: Screen, Modes, Keyboard, Terminal IO
+- [x] VT sequence recording (CSI, OSC, ESC, C0, SGR)
+- [x] Metal-rendered with native tab control (InspectorView.swift)
+- [x] Scrollable views, resizable divider
+- [x] Cmd+Opt+I toggle
+
+### 6.7 Font Size & Appearance
+
+- [x] Cmd+Plus/Minus/0 font size adjustment
+- [x] Separate terminal and UI font sizes
+- [x] Atlas rebuild on font change
+- [x] Proxy icon + represented URL from OSC 7
+- [ ] Per-surface font size override
+
+### 6.8 Context Menu
+
+- [x] Right-click context menu on terminal (TerminalView.swift)
+- [x] Copy (when selection active), Paste, Split Right, Split Down, Toggle Inspector
+
+---
+
 ## Progress Summary
 
 | Phase | Total Items | Done | Remaining |
 |-------|------------|------|-----------|
 | 1 — Daily Driver | ~35 | ~34 | ~1 |
-| 2 — Correctness | ~68 | ~68 | ~0 |
+| 2 — Correctness | ~78 | ~73 | ~5 |
 | 3 — Modern Protocols | ~25 | ~16 | ~9 |
-| 4 — Config | ~15 | ~7 | ~8 |
+| 4 — Config | ~15 | ~8 | ~7 |
 | 5 — Infrastructure | ~25 | ~4 | ~21 |
-| **Total** | **~168** | **~129** | **~39** |
+| 6 — App UI | ~38 | ~30 | ~8 |
+| **Total** | **~216** | **~165** | **~51** |
 
-libcotty is at roughly **77% checkbox completion**. Phase 1 is effectively complete (only semantic selection remains). Phase 2 is fully complete — all ESC sequences (DECBI/DECFI/DECID/LS2/LS3), character sets (UK, G2/G3), SGR extensions (underline color 58/59), DEC modes (3/66/67/69/80/2027), and XTVERSION are implemented. Phase 3 now includes OSC 133 semantic prompts with jump-to-prompt navigation and the Kitty keyboard protocol. The biggest remaining gaps are Kitty graphics, hyperlinks, search, keybindings, and Unicode width handling.
+libcotty is at roughly **76% checkbox completion**. Phase 1 is effectively complete (only semantic selection remains). Phase 2 is nearly complete — all ESC/CSI/SGR sequences, character sets, and rendering correctness fixes (inverse, DIM, bold-as-bright, scale factor) are done; remaining gaps are text decoration rendering (underline, strikethrough, italic, bold fonts). Phase 3 includes OSC 133 semantic prompts and Kitty keyboard protocol. Phase 6 (App UI) is largely done — tabs, splits, file tree, command palette, theme selector, inspector, and font controls are all working. The biggest remaining gaps are Kitty graphics, hyperlinks, search, keybindings, Unicode width handling, and text decoration rendering.
