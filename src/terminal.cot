@@ -8,6 +8,49 @@ import "config"
 import "input"
 
 // ============================================================================
+// Full 256-color Palette Builder
+// ============================================================================
+
+/// Build a full 256-entry palette (768 i64 values = 256 colors × 3 RGB) from
+/// a 16-color theme palette (48 values). Colors 16-231 = 6×6×6 cube,
+/// colors 232-255 = grayscale ramp.
+fn buildFullPalette(theme_pal: *List(i64)) List(i64) {
+    var pal: List(i64) = .{}
+
+    // Copy 16 theme colors (indices 0-15)
+    for i in 0..48 {
+        pal.append(theme_pal.get(i))
+    }
+
+    // 6×6×6 color cube (indices 16-231)
+    for idx in 16..232 {
+        const ci = idx - 16
+        const r_level = ci / 36
+        const g_level = (ci / 6) % 6
+        const b_level = ci % 6
+        pal.append(cubeLevel_(r_level))
+        pal.append(cubeLevel_(g_level))
+        pal.append(cubeLevel_(b_level))
+    }
+
+    // Grayscale ramp (indices 232-255)
+    for idx in 232..256 {
+        const gray = (idx - 232) * 10 + 8
+        pal.append(gray)
+        pal.append(gray)
+        pal.append(gray)
+    }
+
+    return pal
+}
+
+/// Convert a 6×6×6 cube level (0-5) to an 8-bit color value.
+fn cubeLevel_(level: i64) i64 {
+    if (level == 0) { return 0 }
+    return 55 + level * 40
+}
+
+// ============================================================================
 // TerminalGrid — flat cell storage (rows * cols)
 // ============================================================================
 
@@ -93,8 +136,14 @@ struct TerminalGrid {
 
     /// Clear a single row to default blank cells and reset its wrap flag.
     fn clearLine(row: i64) void {
+        var default_cell = Cell.init()
+        self.clearLineWith(row, &default_cell)
+    }
+
+    /// Clear a single row to a specific blank cell and reset its wrap/semantic flags.
+    fn clearLineWith(row: i64, blank: *Cell) void {
         for col in 0..self.cols {
-            self.getCell(row, col).* = Cell.init()
+            self.getCell(row, col).* = blank.*
         }
         self.setRowWrap(row, 0)
         self.setRowSemantic(row, 0)
@@ -103,14 +152,15 @@ struct TerminalGrid {
     /// Scroll the region [top..bottom] up by one line.
     /// Full-screen scroll on primary screen: append blank row, increment active_start
     /// (old top row preserved as scrollback). Sub-region: memcpy within active area.
-    fn scrollUp(top: i64, bottom: i64) void {
+    /// Cleared cells use the provided blank cell (carries current SGR bg).
+    fn scrollUp(top: i64, bottom: i64, blank: *Cell) void {
         // Full-screen scroll with scrollback enabled: no memcpy needed
         if (top == 0) {
             if (bottom == self.rows - 1) {
                 if (self.scrollback_enabled == 1) {
                     // Append a blank row of cells
                     for i in 0..self.cols {
-                        self.cells.append(Cell.init())
+                        self.cells.append(blank.*)
                     }
                     // Append wrap and semantic flags for the new row
                     self.row_wrap.append(0)
@@ -132,12 +182,12 @@ struct TerminalGrid {
             self.setRowSemantic(row, self.getRowSemantic(row + 1))
             row += 1
         }
-        self.clearLine(bottom)
+        self.clearLineWith(bottom, blank)
     }
 
     /// Scroll the region [top..bottom] down by one line.
-    /// Content and wrap flags shift down, top line is cleared with defaults.
-    fn scrollDown(top: i64, bottom: i64) void {
+    /// Content and wrap flags shift down, top line is cleared with provided blank cell.
+    fn scrollDown(top: i64, bottom: i64, blank: *Cell) void {
         var row = bottom
         while (row > top) {
             const dst = self.cells.items + ((self.active_start + row) * self.cols) * @sizeOf(Cell)
@@ -147,23 +197,23 @@ struct TerminalGrid {
             self.setRowSemantic(row, self.getRowSemantic(row - 1))
             row -= 1
         }
-        self.clearLine(top)
+        self.clearLineWith(top, blank)
     }
 
     /// Insert count blank lines at row, shifting content down within [row..bottom].
-    fn insertLines(row: i64, count: i64, bottom: i64) void {
+    fn insertLines(row: i64, count: i64, bottom: i64, blank: *Cell) void {
         var i: i64 = 0
         while (i < count) {
-            self.scrollDown(row, bottom)
+            self.scrollDown(row, bottom, blank)
             i += 1
         }
     }
 
     /// Delete count lines at row, shifting content up within [row..bottom].
-    fn deleteLines(row: i64, count: i64, bottom: i64) void {
+    fn deleteLines(row: i64, count: i64, bottom: i64, blank: *Cell) void {
         var i: i64 = 0
         while (i < count) {
-            self.scrollUp(row, bottom)
+            self.scrollUp(row, bottom, blank)
             i += 1
         }
     }
@@ -379,13 +429,34 @@ struct TerminalState {
     cursor_col: i64,
     saved_row: i64,
     saved_col: i64,
+    saved_pending_wrap: bool,
+    saved_origin: bool,
+    saved_fg_type: i64,
+    saved_fg_val: i64,
+    saved_bg_type: i64,
+    saved_bg_val: i64,
+    saved_bold: bool,
+    saved_dim: bool,
+    saved_italic: bool,
+    saved_underline: bool,
+    saved_inverse: bool,
+    saved_strikethrough: bool,
+    saved_blink: bool,
+    saved_hidden: bool,
+    saved_overline: bool,
+    saved_double_underline: bool,
+    saved_ul_type: i64,
+    saved_ul_val: i64,
+    saved_charset_g0: i64,
+    saved_charset_g1: i64,
+    saved_charset_g2: i64,
+    saved_charset_g3: i64,
+    saved_active_charset: i64,
     pending_wrap: bool,
-    fg_r: i64,
-    fg_g: i64,
-    fg_b: i64,
-    bg_r: i64,
-    bg_g: i64,
-    bg_b: i64,
+    fg_type: i64,
+    fg_val: i64,
+    bg_type: i64,
+    bg_val: i64,
     bold: bool,
     dim: bool,
     italic: bool,
@@ -396,12 +467,10 @@ struct TerminalState {
     hidden: bool,
     overline: bool,
     double_underline: bool,
-    default_fg_r: i64,
-    default_fg_g: i64,
-    default_fg_b: i64,
-    default_bg_r: i64,
-    default_bg_g: i64,
-    default_bg_b: i64,
+    default_fg_type: i64,
+    default_fg_val: i64,
+    default_bg_type: i64,
+    default_bg_val: i64,
     palette: List(i64),
     scroll_top: i64,
     scroll_bottom: i64,
@@ -452,6 +521,29 @@ struct TerminalState {
     alt_cursor_col: i64,
     alt_saved_row: i64,
     alt_saved_col: i64,
+    alt_saved_pending_wrap: bool,
+    alt_saved_origin: bool,
+    alt_saved_fg_type: i64,
+    alt_saved_fg_val: i64,
+    alt_saved_bg_type: i64,
+    alt_saved_bg_val: i64,
+    alt_saved_bold: bool,
+    alt_saved_dim: bool,
+    alt_saved_italic: bool,
+    alt_saved_underline: bool,
+    alt_saved_inverse: bool,
+    alt_saved_strikethrough: bool,
+    alt_saved_blink: bool,
+    alt_saved_hidden: bool,
+    alt_saved_overline: bool,
+    alt_saved_double_underline: bool,
+    alt_saved_ul_type: i64,
+    alt_saved_ul_val: i64,
+    alt_saved_charset_g0: i64,
+    alt_saved_charset_g1: i64,
+    alt_saved_charset_g2: i64,
+    alt_saved_charset_g3: i64,
+    alt_saved_active_charset: i64,
     scroll_accumulator: i64,
     viewport_row: i64,
     kitty_kbd_flags_0: i64,
@@ -463,13 +555,35 @@ struct TerminalState {
     kitty_kbd_flags_6: i64,
     kitty_kbd_flags_7: i64,
     kitty_kbd_idx: i64,
-    ul_r: i64,
-    ul_g: i64,
-    ul_b: i64,
+    ul_type: i64,
+    ul_val: i64,
     mode_backspace_sends_bs: bool,
     mode_left_right_margin: bool,
     mode_sixel_scrolling: bool,
     mode_grapheme_cluster: bool,
+
+    // XTSAVE/XTRESTORE — saved DEC private mode state (CSI ? s / CSI ? r)
+    // Ghostty ref: modes.zig ModeState — parallel saved bitfield
+    xtsaved_app_cursor: bool,
+    xtsaved_origin: bool,
+    xtsaved_wraparound: bool,
+    xtsaved_cursor_visible: bool,
+    xtsaved_alt_screen: bool,
+    xtsaved_mouse_tracking: i64,
+    xtsaved_mouse_format: i64,
+    xtsaved_focus_events: bool,
+    xtsaved_bracketed_paste: bool,
+    xtsaved_sync_output: bool,
+    xtsaved_mouse_alt_scroll: bool,
+    xtsaved_insert: bool,
+    xtsaved_reverse_video: bool,
+    xtsaved_cursor_blinking: bool,
+    xtsaved_reverse_wrap: bool,
+    xtsaved_app_keypad: bool,
+    xtsaved_backspace_sends_bs: bool,
+    xtsaved_left_right_margin: bool,
+    xtsaved_sixel_scrolling: bool,
+    xtsaved_grapheme_cluster: bool,
 
     /// Create a terminal with the given dimensions and default state.
     static fn init(rows: i64, cols: i64) TerminalState {
@@ -480,13 +594,34 @@ struct TerminalState {
             cursor_col: 0,
             saved_row: 0,
             saved_col: 0,
+            saved_pending_wrap: false,
+            saved_origin: false,
+            saved_fg_type: COLOR_NONE,
+            saved_fg_val: 0,
+            saved_bg_type: COLOR_NONE,
+            saved_bg_val: 0,
+            saved_bold: false,
+            saved_dim: false,
+            saved_italic: false,
+            saved_underline: false,
+            saved_inverse: false,
+            saved_strikethrough: false,
+            saved_blink: false,
+            saved_hidden: false,
+            saved_overline: false,
+            saved_double_underline: false,
+            saved_ul_type: COLOR_NONE,
+            saved_ul_val: 0,
+            saved_charset_g0: 0,
+            saved_charset_g1: 0,
+            saved_charset_g2: 0,
+            saved_charset_g3: 0,
+            saved_active_charset: 0,
             pending_wrap: false,
-            fg_r: THEME_FG_R,
-            fg_g: THEME_FG_G,
-            fg_b: THEME_FG_B,
-            bg_r: THEME_BG_R,
-            bg_g: THEME_BG_G,
-            bg_b: THEME_BG_B,
+            fg_type: COLOR_NONE,
+            fg_val: 0,
+            bg_type: COLOR_NONE,
+            bg_val: 0,
             bold: false,
             dim: false,
             italic: false,
@@ -497,13 +632,11 @@ struct TerminalState {
             hidden: false,
             overline: false,
             double_underline: false,
-            default_fg_r: THEME_FG_R,
-            default_fg_g: THEME_FG_G,
-            default_fg_b: THEME_FG_B,
-            default_bg_r: THEME_BG_R,
-            default_bg_g: THEME_BG_G,
-            default_bg_b: THEME_BG_B,
-            palette: THEME_PALETTE,
+            default_fg_type: COLOR_NONE,
+            default_fg_val: 0,
+            default_bg_type: COLOR_NONE,
+            default_bg_val: 0,
+            palette: buildFullPalette(THEME_PALETTE),
             scroll_top: 0,
             scroll_bottom: rows - 1,
             pty_fd: -1,
@@ -553,6 +686,29 @@ struct TerminalState {
             alt_cursor_col: 0,
             alt_saved_row: 0,
             alt_saved_col: 0,
+            alt_saved_pending_wrap: false,
+            alt_saved_origin: false,
+            alt_saved_fg_type: COLOR_NONE,
+            alt_saved_fg_val: 0,
+            alt_saved_bg_type: COLOR_NONE,
+            alt_saved_bg_val: 0,
+            alt_saved_bold: false,
+            alt_saved_dim: false,
+            alt_saved_italic: false,
+            alt_saved_underline: false,
+            alt_saved_inverse: false,
+            alt_saved_strikethrough: false,
+            alt_saved_blink: false,
+            alt_saved_hidden: false,
+            alt_saved_overline: false,
+            alt_saved_double_underline: false,
+            alt_saved_ul_type: COLOR_NONE,
+            alt_saved_ul_val: 0,
+            alt_saved_charset_g0: 0,
+            alt_saved_charset_g1: 0,
+            alt_saved_charset_g2: 0,
+            alt_saved_charset_g3: 0,
+            alt_saved_active_charset: 0,
             scroll_accumulator: 0,
             viewport_row: -1,
             kitty_kbd_flags_0: 0,
@@ -564,13 +720,44 @@ struct TerminalState {
             kitty_kbd_flags_6: 0,
             kitty_kbd_flags_7: 0,
             kitty_kbd_idx: 0,
-            ul_r: -1,
-            ul_g: -1,
-            ul_b: -1,
+            ul_type: COLOR_NONE,
+            ul_val: 0,
             mode_backspace_sends_bs: false,
             mode_left_right_margin: false,
             mode_sixel_scrolling: false,
             mode_grapheme_cluster: false,
+            xtsaved_app_cursor: false,
+            xtsaved_origin: false,
+            xtsaved_wraparound: true,
+            xtsaved_cursor_visible: true,
+            xtsaved_alt_screen: false,
+            xtsaved_mouse_tracking: 0,
+            xtsaved_mouse_format: 0,
+            xtsaved_focus_events: false,
+            xtsaved_bracketed_paste: false,
+            xtsaved_sync_output: false,
+            xtsaved_mouse_alt_scroll: true,
+            xtsaved_insert: false,
+            xtsaved_reverse_video: false,
+            xtsaved_cursor_blinking: false,
+            xtsaved_reverse_wrap: false,
+            xtsaved_app_keypad: false,
+            xtsaved_backspace_sends_bs: false,
+            xtsaved_left_right_margin: false,
+            xtsaved_sixel_scrolling: false,
+            xtsaved_grapheme_cluster: false,
+        }
+    }
+
+    /// Create a blank cell that carries the current SGR background color.
+    /// Ghostty ref: clearCells fills with the cursor's current bg style.
+    fn blankCell() Cell {
+        return Cell {
+            codepoint: 0,
+            fg_type: COLOR_NONE, fg_val: 0,
+            bg_type: self.bg_type, bg_val: self.bg_val,
+            flags: 0,
+            ul_type: COLOR_NONE, ul_val: 0,
         }
     }
 
@@ -608,7 +795,8 @@ struct TerminalState {
                 self.cursor_col = 0
                 self.cursor_row += 1
                 if (self.cursor_row > self.scroll_bottom) {
-                    self.grid.scrollUp(self.scroll_top, self.scroll_bottom)
+                    var blank = self.blankCell()
+                    self.grid.scrollUp(self.scroll_top, self.scroll_bottom, &blank)
                     self.cursor_row = self.scroll_bottom
                 }
                 self.pending_wrap = false
@@ -627,12 +815,10 @@ struct TerminalState {
 
         const c = self.grid.getCell(self.cursor_row, self.cursor_col)
         c.codepoint = mapped
-        c.fg_r = self.fg_r
-        c.fg_g = self.fg_g
-        c.fg_b = self.fg_b
-        c.bg_r = self.bg_r
-        c.bg_g = self.bg_g
-        c.bg_b = self.bg_b
+        c.fg_type = self.fg_type
+        c.fg_val = self.fg_val
+        c.bg_type = self.bg_type
+        c.bg_val = self.bg_val
         c.flags = 0
         if (self.bold) { c.flags = c.flags | CELL_BOLD }
         if (self.dim) { c.flags = c.flags | CELL_DIM }
@@ -644,10 +830,9 @@ struct TerminalState {
         if (self.hidden) { c.flags = c.flags | CELL_HIDDEN }
         if (self.overline) { c.flags = c.flags | CELL_OVERLINE }
         if (self.double_underline) { c.flags = c.flags | CELL_DOUBLE_UNDERLINE }
-        c.ul_r = self.ul_r
-        c.ul_g = self.ul_g
-        c.ul_b = self.ul_b
-        if (self.ul_r >= 0) { c.flags = c.flags | CELL_CUSTOM_UL_COLOR }
+        c.ul_type = self.ul_type
+        c.ul_val = self.ul_val
+        if (self.ul_type != COLOR_NONE) { c.flags = c.flags | CELL_CUSTOM_UL_COLOR }
 
         self.previous_char = mapped
 
@@ -666,7 +851,8 @@ struct TerminalState {
         self.pending_wrap = false
         self.cursor_row += 1
         if (self.cursor_row > self.scroll_bottom) {
-            self.grid.scrollUp(self.scroll_top, self.scroll_bottom)
+            var blank = self.blankCell()
+            self.grid.scrollUp(self.scroll_top, self.scroll_bottom, &blank)
             self.cursor_row = self.scroll_bottom
         }
     }
@@ -830,53 +1016,72 @@ struct TerminalState {
     // -- Erase operations (CSI J/K) -----------------------------------------
 
     /// Erase in display: 0 = below cursor, 1 = above cursor, 2 = entire screen.
+    /// Uses current SGR background (Ghostty: clearCells with cursor style bg).
     fn eraseInDisplay(mode: i64) void {
         self.pending_wrap = false
+        var blank = self.blankCell()
         if (mode == 0) {
             var col = self.cursor_col
             while (col < self.grid.cols) {
-                self.grid.getCell(self.cursor_row, col).* = Cell.init()
+                self.grid.getCell(self.cursor_row, col).* = blank
                 col += 1
             }
+            self.grid.setRowWrap(self.cursor_row, 0)
             var row = self.cursor_row + 1
             while (row < self.grid.rows) {
-                self.grid.clearLine(row)
+                self.clearLineWithBg(row, &blank)
                 row += 1
             }
         } else if (mode == 1) {
             var row: i64 = 0
             while (row < self.cursor_row) {
-                self.grid.clearLine(row)
+                self.clearLineWithBg(row, &blank)
                 row += 1
             }
             var col: i64 = 0
             while (col <= self.cursor_col) {
-                self.grid.getCell(self.cursor_row, col).* = Cell.init()
+                self.grid.getCell(self.cursor_row, col).* = blank
                 col += 1
             }
         } else if (mode == 2) {
-            self.grid.clear()
+            var row: i64 = 0
+            while (row < self.grid.rows) {
+                self.clearLineWithBg(row, &blank)
+                row += 1
+            }
         }
     }
 
     /// Erase in line: 0 = right of cursor, 1 = left of cursor, 2 = entire line.
+    /// Uses current SGR background.
     fn eraseInLine(mode: i64) void {
         self.pending_wrap = false
+        var blank = self.blankCell()
         if (mode == 0) {
             var col = self.cursor_col
             while (col < self.grid.cols) {
-                self.grid.getCell(self.cursor_row, col).* = Cell.init()
+                self.grid.getCell(self.cursor_row, col).* = blank
                 col += 1
             }
+            self.grid.setRowWrap(self.cursor_row, 0)
         } else if (mode == 1) {
             var col: i64 = 0
             while (col <= self.cursor_col) {
-                self.grid.getCell(self.cursor_row, col).* = Cell.init()
+                self.grid.getCell(self.cursor_row, col).* = blank
                 col += 1
             }
         } else if (mode == 2) {
-            self.grid.clearLine(self.cursor_row)
+            self.clearLineWithBg(self.cursor_row, &blank)
         }
+    }
+
+    /// Clear a single row to the given blank cell and reset wrap/semantic flags.
+    fn clearLineWithBg(row: i64, blank: *Cell) void {
+        for col in 0..self.grid.cols {
+            self.grid.getCell(row, col).* = blank.*
+        }
+        self.grid.setRowWrap(row, 0)
+        self.grid.setRowSemantic(row, 0)
     }
 
     // -- Index / scroll (IND, RI) -------------------------------------------
@@ -885,7 +1090,8 @@ struct TerminalState {
     fn index_() void {
         self.pending_wrap = false
         if (self.cursor_row == self.scroll_bottom) {
-            self.grid.scrollUp(self.scroll_top, self.scroll_bottom)
+            var blank = self.blankCell()
+            self.grid.scrollUp(self.scroll_top, self.scroll_bottom, &blank)
         } else if (self.cursor_row < self.grid.rows - 1) {
             self.cursor_row += 1
         }
@@ -895,7 +1101,8 @@ struct TerminalState {
     fn reverseIndex() void {
         self.pending_wrap = false
         if (self.cursor_row == self.scroll_top) {
-            self.grid.scrollDown(self.scroll_top, self.scroll_bottom)
+            var blank = self.blankCell()
+            self.grid.scrollDown(self.scroll_top, self.scroll_bottom, &blank)
         } else if (self.cursor_row > 0) {
             self.cursor_row -= 1
         }
@@ -906,6 +1113,7 @@ struct TerminalState {
     fn backIndex() void {
         self.pending_wrap = false
         if (self.cursor_col == 0) {
+            const blank = self.blankCell()
             // Shift all cells in each row of the scroll region right by one
             var row = self.scroll_top
             while (row <= self.scroll_bottom) {
@@ -914,7 +1122,7 @@ struct TerminalState {
                     self.grid.getCell(row, col).* = self.grid.getCell(row, col - 1).*
                     col -= 1
                 }
-                self.grid.getCell(row, 0).* = Cell.init()
+                self.grid.getCell(row, 0).* = blank
                 row += 1
             }
         } else {
@@ -927,6 +1135,7 @@ struct TerminalState {
     fn forwardIndex() void {
         self.pending_wrap = false
         if (self.cursor_col >= self.grid.cols - 1) {
+            const blank = self.blankCell()
             // Shift all cells in each row of the scroll region left by one
             var row = self.scroll_top
             while (row <= self.scroll_bottom) {
@@ -935,7 +1144,7 @@ struct TerminalState {
                     self.grid.getCell(row, col).* = self.grid.getCell(row, col + 1).*
                     col += 1
                 }
-                self.grid.getCell(row, self.grid.cols - 1).* = Cell.init()
+                self.grid.getCell(row, self.grid.cols - 1).* = blank
                 row += 1
             }
         } else {
@@ -946,6 +1155,7 @@ struct TerminalState {
     // -- Insert / delete (CSI @, CSI P) -------------------------------------
 
     /// Insert count blank cells at cursor, shifting existing cells right (CSI @).
+    /// Uses current SGR background for new cells.
     fn insertBlanks(count: i64) void {
         self.pending_wrap = false
         const row = self.cursor_row
@@ -959,13 +1169,15 @@ struct TerminalState {
             c -= 1
         }
 
-        // Fill inserted positions with blank cells
+        // Fill inserted positions with blank cells carrying SGR bg
+        const blank = self.blankCell()
         for i in 0..n {
-            self.grid.getCell(row, col + i).* = Cell.init()
+            self.grid.getCell(row, col + i).* = blank
         }
     }
 
     /// Delete count cells at cursor, shifting remaining cells left (CSI P).
+    /// Uses current SGR background for vacated cells.
     fn deleteChars(count: i64) void {
         self.pending_wrap = false
         const row = self.cursor_row
@@ -979,50 +1191,116 @@ struct TerminalState {
             c += 1
         }
 
-        // Clear vacated cells at end of line
+        // Clear vacated cells at end of line with SGR bg
+        const blank = self.blankCell()
         c = self.grid.cols - n
         while (c < self.grid.cols) {
-            self.grid.getCell(row, c).* = Cell.init()
+            self.grid.getCell(row, c).* = blank
             c += 1
         }
     }
 
+    /// Insert count blank lines at cursor row (CSI L).
+    /// Uses current SGR background. Cursor moves to column 0 per Ghostty.
+    fn handleInsertLines(count: i64) void {
+        self.pending_wrap = false
+        var blank = self.blankCell()
+        self.grid.insertLines(self.cursor_row, count, self.scroll_bottom, &blank)
+        self.cursor_col = 0
+    }
+
+    /// Delete count lines at cursor row (CSI M).
+    /// Uses current SGR background. Cursor moves to column 0 per Ghostty.
+    fn handleDeleteLines(count: i64) void {
+        self.pending_wrap = false
+        var blank = self.blankCell()
+        self.grid.deleteLines(self.cursor_row, count, self.scroll_bottom, &blank)
+        self.cursor_col = 0
+    }
+
     /// Erase N characters at cursor position without moving cursor (ECH).
+    /// Uses current SGR background.
     fn eraseChars(count: i64) void {
         self.pending_wrap = false
         const row = self.cursor_row
         const col = self.cursor_col
         const n = @min(count, self.grid.cols - col)
+        const blank = self.blankCell()
         for c in 0..n {
-            self.grid.getCell(row, col + c).* = Cell.init()
+            self.grid.getCell(row, col + c).* = blank
         }
     }
 
     // -- Save / restore cursor (DECSC, DECRC) -------------------------------
 
-    /// Save cursor position (DECSC).
+    /// Save cursor position and state (DECSC).
+    /// Ghostty ref: Screen.SavedCursor — saves pos, style, pending_wrap, origin, charset.
     fn saveCursor() void {
         self.saved_row = self.cursor_row
         self.saved_col = self.cursor_col
+        self.saved_pending_wrap = self.pending_wrap
+        self.saved_origin = self.mode_origin
+        self.saved_fg_type = self.fg_type
+        self.saved_fg_val = self.fg_val
+        self.saved_bg_type = self.bg_type
+        self.saved_bg_val = self.bg_val
+        self.saved_bold = self.bold
+        self.saved_dim = self.dim
+        self.saved_italic = self.italic
+        self.saved_underline = self.underline
+        self.saved_inverse = self.inverse
+        self.saved_strikethrough = self.strikethrough
+        self.saved_blink = self.blink
+        self.saved_hidden = self.hidden
+        self.saved_overline = self.overline
+        self.saved_double_underline = self.double_underline
+        self.saved_ul_type = self.ul_type
+        self.saved_ul_val = self.ul_val
+        self.saved_charset_g0 = self.charset_g0
+        self.saved_charset_g1 = self.charset_g1
+        self.saved_charset_g2 = self.charset_g2
+        self.saved_charset_g3 = self.charset_g3
+        self.saved_active_charset = self.active_charset
     }
 
-    /// Restore cursor position (DECRC).
+    /// Restore cursor position and state (DECRC).
+    /// Ghostty ref: restores pos, style, pending_wrap, origin, charset.
     fn restoreCursor() void {
-        self.pending_wrap = false
         self.cursor_row = self.saved_row
         self.cursor_col = self.saved_col
+        self.pending_wrap = self.saved_pending_wrap
+        self.mode_origin = self.saved_origin
+        self.fg_type = self.saved_fg_type
+        self.fg_val = self.saved_fg_val
+        self.bg_type = self.saved_bg_type
+        self.bg_val = self.saved_bg_val
+        self.bold = self.saved_bold
+        self.dim = self.saved_dim
+        self.italic = self.saved_italic
+        self.underline = self.saved_underline
+        self.inverse = self.saved_inverse
+        self.strikethrough = self.saved_strikethrough
+        self.blink = self.saved_blink
+        self.hidden = self.saved_hidden
+        self.overline = self.saved_overline
+        self.double_underline = self.saved_double_underline
+        self.ul_type = self.saved_ul_type
+        self.ul_val = self.saved_ul_val
+        self.charset_g0 = self.saved_charset_g0
+        self.charset_g1 = self.saved_charset_g1
+        self.charset_g2 = self.saved_charset_g2
+        self.charset_g3 = self.saved_charset_g3
+        self.active_charset = self.saved_active_charset
     }
 
     // -- SGR attributes -----------------------------------------------------
 
     /// Reset all SGR attributes to defaults.
     fn resetAttributes() void {
-        self.fg_r = self.default_fg_r
-        self.fg_g = self.default_fg_g
-        self.fg_b = self.default_fg_b
-        self.bg_r = self.default_bg_r
-        self.bg_g = self.default_bg_g
-        self.bg_b = self.default_bg_b
+        self.fg_type = self.default_fg_type
+        self.fg_val = self.default_fg_val
+        self.bg_type = self.default_bg_type
+        self.bg_val = self.default_bg_val
         self.bold = false
         self.dim = false
         self.italic = false
@@ -1033,9 +1311,19 @@ struct TerminalState {
         self.hidden = false
         self.overline = false
         self.double_underline = false
-        self.ul_r = -1
-        self.ul_g = -1
-        self.ul_b = -1
+        self.ul_type = COLOR_NONE
+        self.ul_val = 0
+    }
+
+    /// Update terminal colors after a theme change.
+    /// With semantic colors, just update the palette — cells store palette indices,
+    /// so they automatically reflect the new palette at render time. No cell walking needed.
+    fn updateThemeColors() void {
+        // Rebuild full 256-entry palette from new theme's 16-color palette
+        self.palette = buildFullPalette(THEME_PALETTE)
+
+        // Reset current SGR attributes to new defaults
+        self.resetAttributes()
     }
 
     // -- Bell ---------------------------------------------------------------
@@ -1227,11 +1515,24 @@ struct TerminalState {
             },
             7 => { self.mode_wraparound = enable },
             25 => { self.cursor_visible = enable },
-            47, 1047 => {
-                // Legacy alt screen (no cursor save/restore)
+            47 => {
+                // Mode 47: Legacy alt screen — just switch, no cursor save/restore, no clearing.
+                // Ghostty ref: switchScreenMode(.@"47") — copy cursor only.
                 if (enable) {
                     self.enterAltScreen()
                 } else {
+                    self.leaveAltScreen()
+                }
+            },
+            1047 => {
+                // Mode 1047: Alt screen — clears alt on exit.
+                // Ghostty ref: switchScreenMode(.@"1047") — eraseDisplay on disable while on alt.
+                if (enable) {
+                    self.enterAltScreen()
+                } else {
+                    if (self.mode_alt_screen) {
+                        self.eraseInDisplay(2)
+                    }
                     self.leaveAltScreen()
                 }
             },
@@ -1244,10 +1545,15 @@ struct TerminalState {
                 }
             },
             1049 => {
+                // Mode 1049: Save cursor on enter, clear alt, restore cursor on exit.
+                // Ghostty ref: switchScreenMode(.@"1049") — saveCursor on enable,
+                // eraseDisplay + copy cursor on enter, restoreCursor on disable.
                 if (enable) {
+                    self.saveCursor()
                     self.enterAltScreen()
                 } else {
                     self.leaveAltScreen()
+                    self.restoreCursor()
                 }
             },
             1000 => {
@@ -1289,6 +1595,71 @@ struct TerminalState {
     fn setAnsiMode(mode: i64, enable: bool) void {
         switch (mode) {
             4 => { self.mode_insert = enable },
+            else => {},
+        }
+    }
+
+    /// XTSAVE — Save a DEC private mode value (CSI ? Ps s).
+    /// Ghostty ref: modes.zig save() — copies current value to saved slot.
+    fn saveDecMode(mode: i64) void {
+        switch (mode) {
+            1 => { self.xtsaved_app_cursor = self.mode_app_cursor },
+            5 => { self.xtsaved_reverse_video = self.mode_reverse_video },
+            6 => { self.xtsaved_origin = self.mode_origin },
+            7 => { self.xtsaved_wraparound = self.mode_wraparound },
+            12 => { self.xtsaved_cursor_blinking = self.mode_cursor_blinking },
+            25 => { self.xtsaved_cursor_visible = self.cursor_visible },
+            45 => { self.xtsaved_reverse_wrap = self.mode_reverse_wrap },
+            47, 1047, 1049 => { self.xtsaved_alt_screen = self.mode_alt_screen },
+            66 => { self.xtsaved_app_keypad = self.mode_app_keypad },
+            67 => { self.xtsaved_backspace_sends_bs = self.mode_backspace_sends_bs },
+            69 => { self.xtsaved_left_right_margin = self.mode_left_right_margin },
+            80 => { self.xtsaved_sixel_scrolling = self.mode_sixel_scrolling },
+            1000 => { self.xtsaved_mouse_tracking = self.mode_mouse_tracking },
+            1002 => { self.xtsaved_mouse_tracking = self.mode_mouse_tracking },
+            1003 => { self.xtsaved_mouse_tracking = self.mode_mouse_tracking },
+            1004 => { self.xtsaved_focus_events = self.mode_focus_events },
+            1006 => { self.xtsaved_mouse_format = self.mode_mouse_format },
+            1007 => { self.xtsaved_mouse_alt_scroll = self.mode_mouse_alt_scroll },
+            2004 => { self.xtsaved_bracketed_paste = self.mode_bracketed_paste },
+            2026 => { self.xtsaved_sync_output = self.mode_sync_output },
+            2027 => { self.xtsaved_grapheme_cluster = self.mode_grapheme_cluster },
+            else => {},
+        }
+    }
+
+    /// XTRESTORE — Restore a DEC private mode value (CSI ? Ps r).
+    /// Ghostty ref: modes.zig restore() — copies saved value back and applies side effects.
+    fn restoreDecMode(mode: i64) void {
+        switch (mode) {
+            1 => { self.mode_app_cursor = self.xtsaved_app_cursor },
+            5 => { self.mode_reverse_video = self.xtsaved_reverse_video },
+            6 => {
+                self.mode_origin = self.xtsaved_origin
+                self.setCursorPos(0, 0)
+            },
+            7 => { self.mode_wraparound = self.xtsaved_wraparound },
+            12 => { self.mode_cursor_blinking = self.xtsaved_cursor_blinking },
+            25 => { self.cursor_visible = self.xtsaved_cursor_visible },
+            45 => { self.mode_reverse_wrap = self.xtsaved_reverse_wrap },
+            47, 1047, 1049 => {
+                if (self.xtsaved_alt_screen and !self.mode_alt_screen) {
+                    self.setDecMode(mode, true)
+                } else if (!self.xtsaved_alt_screen and self.mode_alt_screen) {
+                    self.setDecMode(mode, false)
+                }
+            },
+            66 => { self.mode_app_keypad = self.xtsaved_app_keypad },
+            67 => { self.mode_backspace_sends_bs = self.xtsaved_backspace_sends_bs },
+            69 => { self.mode_left_right_margin = self.xtsaved_left_right_margin },
+            80 => { self.mode_sixel_scrolling = self.xtsaved_sixel_scrolling },
+            1000, 1002, 1003 => { self.mode_mouse_tracking = self.xtsaved_mouse_tracking },
+            1004 => { self.mode_focus_events = self.xtsaved_focus_events },
+            1006 => { self.mode_mouse_format = self.xtsaved_mouse_format },
+            1007 => { self.mode_mouse_alt_scroll = self.xtsaved_mouse_alt_scroll },
+            2004 => { self.mode_bracketed_paste = self.xtsaved_bracketed_paste },
+            2026 => { self.mode_sync_output = self.xtsaved_sync_output },
+            2027 => { self.mode_grapheme_cluster = self.xtsaved_grapheme_cluster },
             else => {},
         }
     }
@@ -1339,8 +1710,32 @@ struct TerminalState {
         self.viewport_row = -1
         self.alt_cursor_row = self.cursor_row
         self.alt_cursor_col = self.cursor_col
+        // Preserve the primary screen's full saved cursor state
         self.alt_saved_row = self.saved_row
         self.alt_saved_col = self.saved_col
+        self.alt_saved_pending_wrap = self.saved_pending_wrap
+        self.alt_saved_origin = self.saved_origin
+        self.alt_saved_fg_type = self.saved_fg_type
+        self.alt_saved_fg_val = self.saved_fg_val
+        self.alt_saved_bg_type = self.saved_bg_type
+        self.alt_saved_bg_val = self.saved_bg_val
+        self.alt_saved_bold = self.saved_bold
+        self.alt_saved_dim = self.saved_dim
+        self.alt_saved_italic = self.saved_italic
+        self.alt_saved_underline = self.saved_underline
+        self.alt_saved_inverse = self.saved_inverse
+        self.alt_saved_strikethrough = self.saved_strikethrough
+        self.alt_saved_blink = self.saved_blink
+        self.alt_saved_hidden = self.saved_hidden
+        self.alt_saved_overline = self.saved_overline
+        self.alt_saved_double_underline = self.saved_double_underline
+        self.alt_saved_ul_type = self.saved_ul_type
+        self.alt_saved_ul_val = self.saved_ul_val
+        self.alt_saved_charset_g0 = self.saved_charset_g0
+        self.alt_saved_charset_g1 = self.saved_charset_g1
+        self.alt_saved_charset_g2 = self.saved_charset_g2
+        self.alt_saved_charset_g3 = self.saved_charset_g3
+        self.alt_saved_active_charset = self.saved_active_charset
         self.alt_grid = self.grid
         self.grid = TerminalGrid.init(self.grid.rows, self.grid.cols)
         self.grid.scrollback_enabled = 0
@@ -1358,8 +1753,32 @@ struct TerminalState {
         self.grid = self.alt_grid
         self.cursor_row = self.alt_cursor_row
         self.cursor_col = self.alt_cursor_col
+        // Restore the primary screen's full saved cursor state
         self.saved_row = self.alt_saved_row
         self.saved_col = self.alt_saved_col
+        self.saved_pending_wrap = self.alt_saved_pending_wrap
+        self.saved_origin = self.alt_saved_origin
+        self.saved_fg_type = self.alt_saved_fg_type
+        self.saved_fg_val = self.alt_saved_fg_val
+        self.saved_bg_type = self.alt_saved_bg_type
+        self.saved_bg_val = self.alt_saved_bg_val
+        self.saved_bold = self.alt_saved_bold
+        self.saved_dim = self.alt_saved_dim
+        self.saved_italic = self.alt_saved_italic
+        self.saved_underline = self.alt_saved_underline
+        self.saved_inverse = self.alt_saved_inverse
+        self.saved_strikethrough = self.alt_saved_strikethrough
+        self.saved_blink = self.alt_saved_blink
+        self.saved_hidden = self.alt_saved_hidden
+        self.saved_overline = self.alt_saved_overline
+        self.saved_double_underline = self.alt_saved_double_underline
+        self.saved_ul_type = self.alt_saved_ul_type
+        self.saved_ul_val = self.alt_saved_ul_val
+        self.saved_charset_g0 = self.alt_saved_charset_g0
+        self.saved_charset_g1 = self.alt_saved_charset_g1
+        self.saved_charset_g2 = self.alt_saved_charset_g2
+        self.saved_charset_g3 = self.alt_saved_charset_g3
+        self.saved_active_charset = self.alt_saved_active_charset
         self.scroll_top = 0
         self.scroll_bottom = self.grid.rows - 1
         self.pending_wrap = false
@@ -2046,7 +2465,7 @@ struct TerminalState {
             if (rows < 0) { rows = 0 - rows }
             var i: i64 = 0
             while (i < rows) {
-                mouseToTerminalBytes(fd, button, col, row, 1)
+                mouseToTerminalBytes(fd, button, col, row, 1, self.mode_mouse_format)
                 i += 1
             }
             return
@@ -2146,22 +2565,39 @@ fn writeDecimalFree(fd: i64, val: i64) void {
     }
 }
 
-/// Encode a mouse event as SGR (mode 1006) sequence and write to PTY fd.
+/// Encode a mouse event and write to PTY fd.
+/// Dispatches to SGR format (mode 1006) or classic X10 format based on format mode.
 /// button: 0=left, 1=middle, 2=right, 32=drag, 64=wheel up, 65=wheel down.
 /// col, row: 1-indexed terminal coordinates.
 /// pressed: 1 for press/wheel, 0 for release.
-/// Format: ESC [ < button ; col ; row M (press) or m (release).
-fn mouseToTerminalBytes(fd: i64, button: i64, col: i64, row: i64, pressed: i64) void {
-    writeStr(fd, "\x1b[<")
-    writeDecimalFree(fd, button)
-    writeStr(fd, ";")
-    writeDecimalFree(fd, col)
-    writeStr(fd, ";")
-    writeDecimalFree(fd, row)
-    if (pressed == 1) {
-        writeStr(fd, "M")
+fn mouseToTerminalBytes(fd: i64, button: i64, col: i64, row: i64, pressed: i64, format: i64) void {
+    if (format == 1006) {
+        // SGR format: ESC [ < button ; col ; row M/m
+        writeStr(fd, "\x1b[<")
+        writeDecimalFree(fd, button)
+        writeStr(fd, ";")
+        writeDecimalFree(fd, col)
+        writeStr(fd, ";")
+        writeDecimalFree(fd, row)
+        if (pressed == 1) {
+            writeStr(fd, "M")
+        } else {
+            writeStr(fd, "m")
+        }
     } else {
-        writeStr(fd, "m")
+        // X10 classic format: ESC [ M cb cx cy
+        // Ghostty ref: input/mouse.zig — X10 encoding
+        var cb = button
+        if (pressed == 0) { cb = 3 }  // All releases encoded as button 3
+        // Clamp coords to X10 range (max 223 = 255 - 32)
+        var cx = col
+        var cy = row
+        if (cx > 223) { cx = 223 }
+        if (cy > 223) { cy = 223 }
+        writeStr(fd, "\x1b[M")
+        writeByte(fd, @intCast(i64, cb + 32))
+        writeByte(fd, @intCast(i64, cx + 32))
+        writeByte(fd, @intCast(i64, cy + 32))
     }
 }
 
@@ -2180,10 +2616,19 @@ fn keyToTerminalBytes(fd: i64, key: i64, mods: i64, app_cursor: bool) void {
     if (has_alt) { mod_param = mod_param + 2 }
     if (has_ctrl) { mod_param = mod_param + 4 }
 
-    // Ctrl+key → control character (0x01-0x1A)
+    // Ctrl+key → control character
+    // Ghostty ref: key_encode.zig ctrlSeq() — Kitty-compatible mapping
     if (has_ctrl and !has_shift and !has_alt) {
         if (key >= 'a' and key <= 'z') { writeByte(fd, key - 0x60); return }
         if (key >= 'A' and key <= 'Z') { writeByte(fd, key - 0x40); return }
+        // Ctrl+special characters
+        if (key == ' ' or key == '2' or key == '@') { writeByte(fd, 0); return }     // NUL
+        if (key == '3') { writeByte(fd, 27); return }                                 // ESC
+        if (key == '4' or key == '\\') { writeByte(fd, 28); return }                  // FS
+        if (key == '5' or key == ']') { writeByte(fd, 29); return }                   // GS
+        if (key == '6' or key == '^' or key == '~') { writeByte(fd, 30); return }     // RS
+        if (key == '7' or key == '_' or key == '/') { writeByte(fd, 31); return }     // US
+        if (key == '8' or key == '?') { writeByte(fd, 127); return }                  // DEL
     }
 
     // Shift+Tab → backtab (ESC [ Z)
@@ -2484,7 +2929,8 @@ test "grid scrollUp shifts content" {
     g.getCell(0, 0).codepoint = 'A'
     g.getCell(1, 0).codepoint = 'B'
     g.getCell(2, 0).codepoint = 'C'
-    g.scrollUp(0, 2)
+    var su_blank = Cell.init()
+    g.scrollUp(0, 2, &su_blank)
     @assertEq(g.getCell(0, 0).codepoint, 'B')
     @assertEq(g.getCell(1, 0).codepoint, 'C')
     @assert(g.getCell(2, 0).isBlank())
@@ -2493,9 +2939,10 @@ test "grid scrollUp shifts content" {
 test "grid scrollUp preserves default colors" {
     var g = TerminalGrid.init(3, 4)
     g.getCell(0, 0).codepoint = 'A'
-    g.scrollUp(0, 2)
-    @assertEq(g.getCell(2, 0).fg_r, 217)
-    @assertEq(g.getCell(2, 0).bg_r, 12)
+    var su_blank = Cell.init()
+    g.scrollUp(0, 2, &su_blank)
+    @assertEq(g.getCell(2, 0).fg_type, COLOR_NONE)
+    @assertEq(g.getCell(2, 0).bg_type, COLOR_NONE)
 }
 
 test "grid scrollDown shifts content" {
@@ -2503,7 +2950,8 @@ test "grid scrollDown shifts content" {
     g.getCell(0, 0).codepoint = 'A'
     g.getCell(1, 0).codepoint = 'B'
     g.getCell(2, 0).codepoint = 'C'
-    g.scrollDown(0, 2)
+    var sd_blank = Cell.init()
+    g.scrollDown(0, 2, &sd_blank)
     @assert(g.getCell(0, 0).isBlank())
     @assertEq(g.getCell(1, 0).codepoint, 'A')
     @assertEq(g.getCell(2, 0).codepoint, 'B')
@@ -2524,14 +2972,13 @@ test "putChar basic" {
 
 test "putChar applies SGR attributes" {
     var t = TerminalState.init(24, 80)
-    t.fg_r = 255
-    t.fg_g = 0
-    t.fg_b = 0
+    t.fg_type = COLOR_RGB
+    t.fg_val = packRgb(255, 0, 0)
     t.bold = true
     t.putChar('X')
     const c = t.grid.getCell(0, 0)
-    @assertEq(c.fg_r, 255)
-    @assertEq(c.fg_g, 0)
+    @assertEq(c.fg_type, COLOR_RGB)
+    @assertEq(c.fg_val, packRgb(255, 0, 0))
     @assertEq(c.flags & CELL_BOLD, CELL_BOLD)
 }
 
@@ -2844,14 +3291,12 @@ test "saveCursor restoreCursor" {
 
 test "resetAttributes restores defaults" {
     var t = TerminalState.init(3, 4)
-    t.fg_r = 255
-    t.fg_g = 0
-    t.fg_b = 0
+    t.fg_type = COLOR_RGB
+    t.fg_val = packRgb(255, 0, 0)
     t.bold = true
     t.resetAttributes()
-    @assertEq(t.fg_r, t.default_fg_r)
-    @assertEq(t.fg_g, t.default_fg_g)
-    @assertEq(t.fg_b, t.default_fg_b)
+    @assertEq(t.fg_type, t.default_fg_type)
+    @assertEq(t.fg_val, t.default_fg_val)
     @assertEq(t.bold, false)
 }
 
@@ -2988,7 +3433,8 @@ test "scrollUp shifts wrap flags" {
     g.setRowWrap(0, 1)
     g.setRowWrap(1, 0)
     g.setRowWrap(2, 1)
-    g.scrollUp(0, 2)
+    var su_blank = Cell.init()
+    g.scrollUp(0, 2, &su_blank)
     @assertEq(g.getRowWrap(0), 0)
     @assertEq(g.getRowWrap(1), 1)
     @assertEq(g.getRowWrap(2), 0)
@@ -3002,7 +3448,8 @@ test "scrollDown shifts wrap flags" {
     g.setRowWrap(0, 1)
     g.setRowWrap(1, 0)
     g.setRowWrap(2, 1)
-    g.scrollDown(0, 2)
+    var sd_blank = Cell.init()
+    g.scrollDown(0, 2, &sd_blank)
     @assertEq(g.getRowWrap(0), 0)
     @assertEq(g.getRowWrap(1), 1)
     @assertEq(g.getRowWrap(2), 0)

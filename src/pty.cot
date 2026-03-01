@@ -3,6 +3,7 @@
 
 import "std/sys"
 import "std/process"
+import "std/mem"
 
 /// Unpack the master fd from openpty()/pipe() packed result.
 fn masterFd(fds: i64) i64 {
@@ -12,6 +13,87 @@ fn masterFd(fds: i64) i64 {
 /// Unpack the slave fd from openpty() packed result.
 fn slaveFd(fds: i64) i64 {
     return (fds >> 32) & 4294967295
+}
+
+/// Check if an env var entry (raw bytes) starts with a given prefix.
+/// Used to filter inherited env vars like TERM=, COLORTERM=, etc.
+fn envHasPrefix(ptr: i64, len: i64, prefix: string) bool {
+    return startsWith(ptr, len, @ptrOf(prefix), @lenOf(prefix))
+}
+
+/// Check if an env var should be excluded (we're overriding it).
+fn isOverriddenEnvVar(ptr: i64, len: i64) bool {
+    if (envHasPrefix(ptr, len, "TERM=")) { return true }
+    if (envHasPrefix(ptr, len, "COLORTERM=")) { return true }
+    if (envHasPrefix(ptr, len, "TERM_PROGRAM=")) { return true }
+    return false
+}
+
+/// Copy a string literal into a buffer as a null-terminated C string.
+/// Returns pointer to the allocated C string.
+fn allocCString(s: string) i64 {
+    const len = @lenOf(s)
+    const buf = alloc(0, len + 1)
+    memcpy(buf, @ptrOf(s), len)
+    @intToPtr(*u8, buf + len).* = @intCast(u8, 0)
+    return buf
+}
+
+/// Build envp for PTY child: inherit parent env, override TERM/COLORTERM/TERM_PROGRAM.
+/// Ghostty ref: Exec.zig Subprocess.init() — sets TERM, COLORTERM, TERM_PROGRAM.
+fn buildPtyEnvp() i64 {
+    const parent_count = environ_count()
+    const extra_count: i64 = 3
+
+    // First pass: count entries to keep and total string size
+    var keep_count: i64 = 0
+    var keep_size: i64 = 0
+    var i: i64 = 0
+    while (i < parent_count) {
+        const ptr = environ_ptr(i)
+        const len = environ_len(i)
+        if (!isOverriddenEnvVar(ptr, len)) {
+            keep_count += 1
+            keep_size += len + 1
+        }
+        i += 1
+    }
+
+    // Allocate pointer array: kept + extra + null terminator
+    const total_entries = keep_count + extra_count
+    const envp = alloc(0, (total_entries + 1) * 8)
+
+    // Allocate string buffer for kept entries
+    const str_buf = alloc(0, keep_size)
+
+    // Second pass: copy kept entries
+    var pos: i64 = 0
+    var slot: i64 = 0
+    i = 0
+    while (i < parent_count) {
+        const ptr = environ_ptr(i)
+        const len = environ_len(i)
+        if (!isOverriddenEnvVar(ptr, len)) {
+            memcpy(str_buf + pos, ptr, len)
+            @intToPtr(*u8, str_buf + pos + len).* = @intCast(u8, 0)
+            @intToPtr(*i64, envp + slot * 8).* = str_buf + pos
+            pos += len + 1
+            slot += 1
+        }
+        i += 1
+    }
+
+    // Add our custom entries
+    @intToPtr(*i64, envp + slot * 8).* = allocCString("TERM=xterm-256color")
+    slot += 1
+    @intToPtr(*i64, envp + slot * 8).* = allocCString("COLORTERM=truecolor")
+    slot += 1
+    @intToPtr(*i64, envp + slot * 8).* = allocCString("TERM_PROGRAM=cotty")
+    slot += 1
+
+    // Null-terminate the pointer array
+    @intToPtr(*i64, envp + slot * 8).* = 0
+    return envp
 }
 
 /// A pseudo-terminal pair: master fd for I/O, child process id.
@@ -45,7 +127,7 @@ struct Pty {
         const shell = "/bin/zsh"
         const path = buildPath(shell)
         const argv = argvBuild1(shell)
-        const envp = buildEnvp()
+        const envp = buildPtyEnvp()
 
         const pid = fork()
         if (pid < 0) {

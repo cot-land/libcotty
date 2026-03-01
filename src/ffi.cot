@@ -18,6 +18,7 @@ import "inspector"
 import "workspace"
 import "file_tree"
 import "command_palette"
+import "theme_palette"
 import "split"
 
 // ============================================================================
@@ -26,6 +27,7 @@ import "split"
 
 var g_app: App = undefined
 var g_palette: CommandPalette = undefined
+var g_theme_palette: ThemePalette = undefined
 
 /// Split tree storage — kept outside Tab struct to avoid memory layout issues.
 /// Fixed-size parallel arrays: g_split_handles[i] is the tab's primary surface handle,
@@ -129,6 +131,12 @@ export fn cotty_app_new() i64 {
     g_palette.addAction("Decrease Font Size", 8)
     g_palette.addAction("Reset Font Size", 9)
     g_palette.addAction("Close Tab", 10)
+    g_palette.addAction("Theme Selector", 11)
+
+    // Init theme palette with built-in themes
+    g_theme_palette = ThemePalette.init()
+    g_theme_palette.addTheme(monokaiRemastered())
+    g_theme_palette.addTheme(catppuccinMocha())
 
     // Init split tree storage
     g_split_count = 0
@@ -512,18 +520,18 @@ export fn cotty_terminal_cell_codepoint(surface: i64, row: i64, col: i64) i64 {
     return getSurfacePtr(surface).terminal.grid.getCell(row, col).codepoint
 }
 
-/// Return the foreground color of the cell at (row, col) as packed RGB.
-/// Format: (r << 16) | (g << 8) | b
+/// Return the foreground color type+val of the cell at (row, col).
+/// Returns (fg_type << 32) | fg_val. Type: 0=none, 1=palette, 2=rgb.
 export fn cotty_terminal_cell_fg(surface: i64, row: i64, col: i64) i64 {
     const c = getSurfacePtr(surface).terminal.grid.getCell(row, col)
-    return (c.fg_r << 16) | (c.fg_g << 8) | c.fg_b
+    return (c.fg_type << 32) | c.fg_val
 }
 
-/// Return the background color of the cell at (row, col) as packed RGB.
-/// Format: (r << 16) | (g << 8) | b
+/// Return the background color type+val of the cell at (row, col).
+/// Returns (bg_type << 32) | bg_val. Type: 0=none, 1=palette, 2=rgb.
 export fn cotty_terminal_cell_bg(surface: i64, row: i64, col: i64) i64 {
     const c = getSurfacePtr(surface).terminal.grid.getCell(row, col)
-    return (c.bg_r << 16) | (c.bg_g << 8) | c.bg_b
+    return (c.bg_type << 32) | c.bg_val
 }
 
 /// Return the flags of the cell at (row, col).
@@ -566,8 +574,8 @@ export fn cotty_terminal_child_pid(surface: i64) i64 {
 
 /// Return a pointer to the visible cells for rendering.
 /// Adjusts for viewport position: when scrolled up, returns scrollback rows.
-/// Each cell is 11 contiguous i64 fields: codepoint, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b, flags, ul_r, ul_g, ul_b.
-/// Stride per cell = 11 * 8 = 88 bytes. Total cells = rows * cols.
+/// Each cell is 8 contiguous i64 fields: codepoint, fg_type, fg_val, bg_type, bg_val, flags, ul_type, ul_val.
+/// Stride per cell = 8 * 8 = 64 bytes. Total cells = rows * cols.
 export fn cotty_terminal_cells_ptr(surface: i64) i64 {
     const sptr = getSurfacePtr(surface)
     const grid = sptr.terminal.grid
@@ -576,6 +584,14 @@ export fn cotty_terminal_cells_ptr(surface: i64) i64 {
         row_offset = sptr.terminal.viewport_row
     }
     return grid.cells.items + row_offset * grid.cols * @sizeOf(Cell)
+}
+
+/// Return a raw pointer to the terminal's 256-color palette data.
+/// The palette is 768 i64 values (256 colors × 3 RGB components).
+/// Used by the renderer to resolve COLOR_PALETTE cells to RGB.
+export fn cotty_terminal_palette_ptr(surface: i64) i64 {
+    const sptr = getSurfacePtr(surface)
+    return sptr.terminal.palette.items
 }
 
 // ============================================================================
@@ -809,7 +825,7 @@ export fn cotty_terminal_mouse_format(surface: i64) i64 {
 export fn cotty_terminal_mouse_event(surface: i64, button: i64, col: i64, row: i64, pressed: i64) void {
     const sptr = getSurfacePtr(surface)
     if (sptr.terminal.mode_mouse_tracking == 0) { return }
-    mouseToTerminalBytes(sptr.shell.master_fd, button, col, row, pressed)
+    mouseToTerminalBytes(sptr.shell.master_fd, button, col, row, pressed, sptr.terminal.mode_mouse_format)
 }
 
 /// Handle a scroll wheel event. All logic lives in Cot (ported from Ghostty).
@@ -1453,6 +1469,80 @@ export fn cotty_palette_move_up() void {
 /// Move selection down.
 export fn cotty_palette_move_down() void {
     g_palette.moveDown()
+}
+
+// ============================================================================
+// Theme Palette
+// ============================================================================
+
+/// Toggle the theme palette open/closed.
+export fn cotty_theme_toggle() void {
+    g_theme_palette.toggle()
+}
+
+/// Return 1 if the theme palette is active, 0 otherwise.
+export fn cotty_theme_active() i64 {
+    if (g_theme_palette.active) { return 1 }
+    return 0
+}
+
+/// Dismiss the theme palette.
+export fn cotty_theme_dismiss() void {
+    g_theme_palette.dismiss()
+}
+
+/// Set the query string from raw bytes and re-filter.
+export fn cotty_theme_set_query(ptr: *u8, len: i64) void {
+    g_theme_palette.setQuery(ptr, len)
+}
+
+/// Return the number of filtered results.
+export fn cotty_theme_result_count() i64 {
+    return g_theme_palette.resultCount()
+}
+
+/// Return a pointer to the title bytes of the result at index.
+export fn cotty_theme_result_title(index: i64) i64 {
+    return g_theme_palette.resultTitle(index)
+}
+
+/// Return the byte length of the title at index.
+export fn cotty_theme_result_title_len(index: i64) i64 {
+    return g_theme_palette.resultTitleLen(index)
+}
+
+/// Return the currently selected index.
+export fn cotty_theme_selected() i64 {
+    return g_theme_palette.selected
+}
+
+/// Move selection up.
+export fn cotty_theme_move_up() void {
+    g_theme_palette.moveUp()
+}
+
+/// Move selection down.
+export fn cotty_theme_move_down() void {
+    g_theme_palette.moveDown()
+}
+
+/// Apply the theme at the given filtered index.
+/// Copies colors into g_app.config, updates global theme defaults, saves to disk.
+/// Updates all active terminal surfaces with new colors (Ghostty-style propagation).
+export fn cotty_theme_apply(index: i64) void {
+    const entry = g_theme_palette.getSelectedTheme(index)
+    applyThemeToConfig(entry, g_app.config)
+    saveToFile(g_app.config, configPath())
+
+    // Propagate to all active terminal surfaces (under lock — IO thread reads palette)
+    for i in 0..g_app.surfaces.count {
+        const s = g_app.surfaces.get(i)
+        if (s.kind == SurfaceKind.Terminal) {
+            s.terminal_mutex.lock()
+            s.terminal.updateThemeColors()
+            s.terminal_mutex.unlock()
+        }
+    }
 }
 
 // ============================================================================

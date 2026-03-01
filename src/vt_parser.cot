@@ -680,30 +680,51 @@ struct VtParser {
             },
             'J' => terminal.eraseInDisplay(self.rawParam(0, 0)),
             'K' => terminal.eraseInLine(self.rawParam(0, 0)),
-            'L' => terminal.grid.insertLines(terminal.cursor_row, self.param(0, 1), terminal.scroll_bottom),
-            'M' => terminal.grid.deleteLines(terminal.cursor_row, self.param(0, 1), terminal.scroll_bottom),
+            'L' => terminal.handleInsertLines(self.param(0, 1)),
+            'M' => terminal.handleDeleteLines(self.param(0, 1)),
             '@' => terminal.insertBlanks(self.param(0, 1)),
             'P' => terminal.deleteChars(self.param(0, 1)),
             'm' => self.dispatchSgr(terminal),
             'r' => {
-                // DECSTBM — 1-indexed params, convert to 0-indexed
-                const top = self.param(0, 1) - 1
-                const bottom = self.param(1, terminal.grid.rows) - 1
-                terminal.setScrollingRegion(top, bottom)
+                if (self.intermediate == '?') {
+                    // XTRESTORE — Restore DEC private mode(s)
+                    var i: i64 = 0
+                    while (i < self.params.count) {
+                        terminal.restoreDecMode(self.params.get(i))
+                        i += 1
+                    }
+                } else {
+                    // DECSTBM — 1-indexed params, convert to 0-indexed
+                    const top = self.param(0, 1) - 1
+                    const bottom = self.param(1, terminal.grid.rows) - 1
+                    terminal.setScrollingRegion(top, bottom)
+                }
+            },
+            's' => {
+                if (self.intermediate == '?') {
+                    // XTSAVE — Save DEC private mode(s)
+                    var i: i64 = 0
+                    while (i < self.params.count) {
+                        terminal.saveDecMode(self.params.get(i))
+                        i += 1
+                    }
+                }
             },
             'S' => {
                 // SU — Scroll Up
+                var su_blank = terminal.blankCell()
                 var count = self.param(0, 1)
                 while (count > 0) {
-                    terminal.grid.scrollUp(terminal.scroll_top, terminal.scroll_bottom)
+                    terminal.grid.scrollUp(terminal.scroll_top, terminal.scroll_bottom, &su_blank)
                     count -= 1
                 }
             },
             'T' => {
                 // SD — Scroll Down
+                var sd_blank = terminal.blankCell()
                 var count = self.param(0, 1)
                 while (count > 0) {
-                    terminal.grid.scrollDown(terminal.scroll_top, terminal.scroll_bottom)
+                    terminal.grid.scrollDown(terminal.scroll_top, terminal.scroll_bottom, &sd_blank)
                     count -= 1
                 }
             },
@@ -876,43 +897,32 @@ struct VtParser {
                 i = self.skipExtendedColor(i)
             } else if (p == 59) {
                 // SGR 59 — Reset underline color to default
-                terminal.ul_r = -1
-                terminal.ul_g = -1
-                terminal.ul_b = -1
+                terminal.ul_type = COLOR_NONE
+                terminal.ul_val = 0
             } else if (p >= 30 and p <= 37) {
-                const r, g, b = basicColor(p - 30, terminal.palette)
-                terminal.fg_r = r
-                terminal.fg_g = g
-                terminal.fg_b = b
+                terminal.fg_type = COLOR_PALETTE
+                terminal.fg_val = p - 30
             } else if (p == 38) {
                 self.applySgrExtendedColor(terminal, i, true)
                 i = self.skipExtendedColor(i)
             } else if (p == 39) {
-                terminal.fg_r = terminal.default_fg_r
-                terminal.fg_g = terminal.default_fg_g
-                terminal.fg_b = terminal.default_fg_b
+                terminal.fg_type = terminal.default_fg_type
+                terminal.fg_val = terminal.default_fg_val
             } else if (p >= 40 and p <= 47) {
-                const r, g, b = basicColor(p - 40, terminal.palette)
-                terminal.bg_r = r
-                terminal.bg_g = g
-                terminal.bg_b = b
+                terminal.bg_type = COLOR_PALETTE
+                terminal.bg_val = p - 40
             } else if (p == 48) {
                 self.applySgrExtendedColor(terminal, i, false)
                 i = self.skipExtendedColor(i)
             } else if (p == 49) {
-                terminal.bg_r = terminal.default_bg_r
-                terminal.bg_g = terminal.default_bg_g
-                terminal.bg_b = terminal.default_bg_b
+                terminal.bg_type = terminal.default_bg_type
+                terminal.bg_val = terminal.default_bg_val
             } else if (p >= 90 and p <= 97) {
-                const r, g, b = basicColor(p - 90 + 8, terminal.palette)
-                terminal.fg_r = r
-                terminal.fg_g = g
-                terminal.fg_b = b
+                terminal.fg_type = COLOR_PALETTE
+                terminal.fg_val = p - 90 + 8
             } else if (p >= 100 and p <= 107) {
-                const r, g, b = basicColor(p - 100 + 8, terminal.palette)
-                terminal.bg_r = r
-                terminal.bg_g = g
-                terminal.bg_b = b
+                terminal.bg_type = COLOR_PALETTE
+                terminal.bg_val = p - 100 + 8
             }
 
             i += 1
@@ -925,25 +935,23 @@ struct VtParser {
         const mode = self.params.get(base + 1)
 
         if (mode == 5 and base + 2 < self.params.count) {
-            const r, g, b = colorFromIndex(self.params.get(base + 2), terminal.palette)
+            // 256-color palette — store as COLOR_PALETTE with index
             if (is_fg) {
-                terminal.fg_r = r
-                terminal.fg_g = g
-                terminal.fg_b = b
+                terminal.fg_type = COLOR_PALETTE
+                terminal.fg_val = self.params.get(base + 2)
             } else {
-                terminal.bg_r = r
-                terminal.bg_g = g
-                terminal.bg_b = b
+                terminal.bg_type = COLOR_PALETTE
+                terminal.bg_val = self.params.get(base + 2)
             }
         } else if (mode == 2 and base + 4 < self.params.count) {
+            // Truecolor — pack as COLOR_RGB
+            const rgb_val = packRgb(self.params.get(base + 2), self.params.get(base + 3), self.params.get(base + 4))
             if (is_fg) {
-                terminal.fg_r = self.params.get(base + 2)
-                terminal.fg_g = self.params.get(base + 3)
-                terminal.fg_b = self.params.get(base + 4)
+                terminal.fg_type = COLOR_RGB
+                terminal.fg_val = rgb_val
             } else {
-                terminal.bg_r = self.params.get(base + 2)
-                terminal.bg_g = self.params.get(base + 3)
-                terminal.bg_b = self.params.get(base + 4)
+                terminal.bg_type = COLOR_RGB
+                terminal.bg_val = rgb_val
             }
         }
     }
@@ -963,14 +971,11 @@ struct VtParser {
         const mode = self.params.get(base + 1)
 
         if (mode == 5 and base + 2 < self.params.count) {
-            const r, g, b = colorFromIndex(self.params.get(base + 2), terminal.palette)
-            terminal.ul_r = r
-            terminal.ul_g = g
-            terminal.ul_b = b
+            terminal.ul_type = COLOR_PALETTE
+            terminal.ul_val = self.params.get(base + 2)
         } else if (mode == 2 and base + 4 < self.params.count) {
-            terminal.ul_r = self.params.get(base + 2)
-            terminal.ul_g = self.params.get(base + 3)
-            terminal.ul_b = self.params.get(base + 4)
+            terminal.ul_type = COLOR_RGB
+            terminal.ul_val = packRgb(self.params.get(base + 2), self.params.get(base + 3), self.params.get(base + 4))
         }
     }
 
@@ -1049,32 +1054,39 @@ struct VtParser {
         } else if (cmd == 10) {
             // OSC 10 — Set/query foreground color
             if (payload_len > 0 and self.osc_buf.get(payload_start) == '?') {
-                terminal.sendColorResponse(10, terminal.default_fg_r, terminal.default_fg_g, terminal.default_fg_b)
+                // Resolve default fg to RGB for the response
+                if (terminal.default_fg_type == COLOR_RGB) {
+                    terminal.sendColorResponse(10, unpackR(terminal.default_fg_val), unpackG(terminal.default_fg_val), unpackB(terminal.default_fg_val))
+                } else {
+                    terminal.sendColorResponse(10, THEME_FG_R, THEME_FG_G, THEME_FG_B)
+                }
             } else if (payload_len >= 7) {
                 const r, g, b = parseColorSpec(self.osc_buf, payload_start, payload_len)
                 if (r >= 0) {
-                    terminal.default_fg_r = r
-                    terminal.default_fg_g = g
-                    terminal.default_fg_b = b
+                    terminal.default_fg_type = COLOR_RGB
+                    terminal.default_fg_val = packRgb(r, g, b)
                 }
             }
         } else if (cmd == 11) {
             // OSC 11 — Set/query background color
             if (payload_len > 0 and self.osc_buf.get(payload_start) == '?') {
-                terminal.sendColorResponse(11, terminal.default_bg_r, terminal.default_bg_g, terminal.default_bg_b)
+                if (terminal.default_bg_type == COLOR_RGB) {
+                    terminal.sendColorResponse(11, unpackR(terminal.default_bg_val), unpackG(terminal.default_bg_val), unpackB(terminal.default_bg_val))
+                } else {
+                    terminal.sendColorResponse(11, THEME_BG_R, THEME_BG_G, THEME_BG_B)
+                }
             } else if (payload_len >= 7) {
                 const r, g, b = parseColorSpec(self.osc_buf, payload_start, payload_len)
                 if (r >= 0) {
-                    terminal.default_bg_r = r
-                    terminal.default_bg_g = g
-                    terminal.default_bg_b = b
+                    terminal.default_bg_type = COLOR_RGB
+                    terminal.default_bg_val = packRgb(r, g, b)
                 }
             }
         } else if (cmd == 12) {
             // OSC 12 — Set/query cursor color (stored for renderer)
             if (payload_len > 0 and self.osc_buf.get(payload_start) == '?') {
-                // Respond with current cursor color — use fg as proxy
-                terminal.sendColorResponse(12, terminal.default_fg_r, terminal.default_fg_g, terminal.default_fg_b)
+                // Respond with current cursor color — use theme fg as proxy
+                terminal.sendColorResponse(12, THEME_FG_R, THEME_FG_G, THEME_FG_B)
             }
         } else if (cmd == 52) {
             // OSC 52 — Clipboard
@@ -1083,14 +1095,12 @@ struct VtParser {
             // OSC 104 — Reset color palette entry (no-op for now, palette is static)
         } else if (cmd == 110) {
             // OSC 110 — Reset foreground color to config defaults
-            terminal.default_fg_r = THEME_FG_R
-            terminal.default_fg_g = THEME_FG_G
-            terminal.default_fg_b = THEME_FG_B
+            terminal.default_fg_type = COLOR_NONE
+            terminal.default_fg_val = 0
         } else if (cmd == 111) {
             // OSC 111 — Reset background color to config defaults
-            terminal.default_bg_r = THEME_BG_R
-            terminal.default_bg_g = THEME_BG_G
-            terminal.default_bg_b = THEME_BG_B
+            terminal.default_bg_type = COLOR_NONE
+            terminal.default_bg_val = 0
         } else if (cmd == 112) {
             // OSC 112 — Reset cursor color (no-op, uses config)
         } else if (cmd == 133) {
@@ -1392,10 +1402,11 @@ test "SGR reset (no params)" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
     t.bold = true
-    t.fg_r = 255
+    t.fg_type = COLOR_RGB
+    t.fg_val = packRgb(255, 0, 0)
     p.feedEsc(t, "[m")
     @assertEq(t.bold, false)
-    @assertEq(t.fg_r, t.default_fg_r)
+    @assertEq(t.fg_type, t.default_fg_type)
 }
 
 test "SGR bold" {
@@ -1410,41 +1421,37 @@ test "SGR bold" {
 test "SGR basic foreground color" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
-    // SGR 31 = red foreground (Monokai Remastered: #f4005f)
+    // SGR 31 = red foreground → palette index 1
     p.feedEsc(t, "[31m")
-    @assertEq(t.fg_r, 244)
-    @assertEq(t.fg_g, 0)
-    @assertEq(t.fg_b, 95)
+    @assertEq(t.fg_type, COLOR_PALETTE)
+    @assertEq(t.fg_val, 1)
 }
 
 test "SGR basic background color" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
-    // SGR 42 = green background (Monokai Remastered: #98e024)
+    // SGR 42 = green background → palette index 2
     p.feedEsc(t, "[42m")
-    @assertEq(t.bg_r, 152)
-    @assertEq(t.bg_g, 224)
-    @assertEq(t.bg_b, 36)
+    @assertEq(t.bg_type, COLOR_PALETTE)
+    @assertEq(t.bg_val, 2)
 }
 
 test "SGR bright foreground" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
-    // SGR 91 = bright red foreground (Monokai Remastered: #f4005f)
+    // SGR 91 = bright red foreground → palette index 9
     p.feedEsc(t, "[91m")
-    @assertEq(t.fg_r, 244)
-    @assertEq(t.fg_g, 0)
-    @assertEq(t.fg_b, 95)
+    @assertEq(t.fg_type, COLOR_PALETTE)
+    @assertEq(t.fg_val, 9)
 }
 
 test "SGR 256-color foreground" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
-    // SGR 38;5;196 = 256-color red
+    // SGR 38;5;196 = palette index 196
     p.feedEsc(t, "[38;5;196m")
-    @assertEq(t.fg_r, 255)
-    @assertEq(t.fg_g, 0)
-    @assertEq(t.fg_b, 0)
+    @assertEq(t.fg_type, COLOR_PALETTE)
+    @assertEq(t.fg_val, 196)
 }
 
 test "SGR truecolor foreground" {
@@ -1452,36 +1459,35 @@ test "SGR truecolor foreground" {
     var t = TerminalState.init(24, 80)
     // SGR 38;2;100;150;200 = RGB foreground
     p.feedEsc(t, "[38;2;100;150;200m")
-    @assertEq(t.fg_r, 100)
-    @assertEq(t.fg_g, 150)
-    @assertEq(t.fg_b, 200)
+    @assertEq(t.fg_type, COLOR_RGB)
+    @assertEq(t.fg_val, packRgb(100, 150, 200))
 }
 
 test "SGR truecolor background" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
     p.feedEsc(t, "[48;2;10;20;30m")
-    @assertEq(t.bg_r, 10)
-    @assertEq(t.bg_g, 20)
-    @assertEq(t.bg_b, 30)
+    @assertEq(t.bg_type, COLOR_RGB)
+    @assertEq(t.bg_val, packRgb(10, 20, 30))
 }
 
 test "SGR default foreground" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
-    t.fg_r = 255
+    t.fg_type = COLOR_RGB
+    t.fg_val = packRgb(255, 0, 0)
     p.feedEsc(t, "[39m")
-    @assertEq(t.fg_r, t.default_fg_r)
+    @assertEq(t.fg_type, t.default_fg_type)
 }
 
 test "SGR combined bold and color" {
     var p = VtParser.init()
     var t = TerminalState.init(24, 80)
-    // SGR 1;31 = bold + red (Monokai Remastered: #f4005f)
+    // SGR 1;31 = bold + palette index 1
     p.feedEsc(t, "[1;31m")
     @assertEq(t.bold, true)
-    @assertEq(t.fg_r, 244)
-    @assertEq(t.fg_g, 0)
+    @assertEq(t.fg_type, COLOR_PALETTE)
+    @assertEq(t.fg_val, 1)
 }
 
 // ============================================================================
@@ -1529,10 +1535,11 @@ test "mixed text and formatting" {
     p.feedEsc(t, "[0m")
     p.feedBytes(t, "!")
     @assertEq(t.grid.getCell(0, 0).codepoint, 'H')
-    @assertEq(t.grid.getCell(0, 0).fg_r, 244)
+    @assertEq(t.grid.getCell(0, 0).fg_type, COLOR_PALETTE)
+    @assertEq(t.grid.getCell(0, 0).fg_val, 1)
     @assertEq(t.grid.getCell(0, 0).flags & CELL_BOLD, CELL_BOLD)
     @assertEq(t.grid.getCell(0, 2).codepoint, '!')
-    @assertEq(t.grid.getCell(0, 2).fg_r, t.default_fg_r)
+    @assertEq(t.grid.getCell(0, 2).fg_type, t.default_fg_type)
     @assertEq(t.grid.getCell(0, 2).flags, 0)
 }
 
@@ -2268,14 +2275,12 @@ test "SGR 58;2;r;g;b sets underline color on cell" {
     var t = TerminalState.init(3, 10)
     // SGR 58;2;255;128;0 — set underline color to orange
     p.feedEsc(t, "[58;2;255;128;0m")
-    @assertEq(t.ul_r, 255)
-    @assertEq(t.ul_g, 128)
-    @assertEq(t.ul_b, 0)
+    @assertEq(t.ul_type, COLOR_RGB)
+    @assertEq(t.ul_val, packRgb(255, 128, 0))
     // Write a char — cell should have underline color
     p.feed(t, 'A')
-    @assertEq(t.grid.getCell(0, 0).ul_r, 255)
-    @assertEq(t.grid.getCell(0, 0).ul_g, 128)
-    @assertEq(t.grid.getCell(0, 0).ul_b, 0)
+    @assertEq(t.grid.getCell(0, 0).ul_type, COLOR_RGB)
+    @assertEq(t.grid.getCell(0, 0).ul_val, packRgb(255, 128, 0))
     @assert((t.grid.getCell(0, 0).flags & CELL_CUSTOM_UL_COLOR) != 0)
 }
 
@@ -2284,7 +2289,8 @@ test "SGR 58;5;n sets underline color from palette" {
     var t = TerminalState.init(3, 10)
     // SGR 58;5;1 — set underline color to palette index 1 (red)
     p.feedEsc(t, "[58;5;1m")
-    @assert(t.ul_r > 0)
+    @assertEq(t.ul_type, COLOR_PALETTE)
+    @assertEq(t.ul_val, 1)
 }
 
 test "SGR 59 resets underline color" {
@@ -2292,11 +2298,10 @@ test "SGR 59 resets underline color" {
     var t = TerminalState.init(3, 10)
     // Set then reset
     p.feedEsc(t, "[58;2;100;200;50m")
-    @assertEq(t.ul_r, 100)
+    @assertEq(t.ul_type, COLOR_RGB)
     p.feedEsc(t, "[59m")
-    @assertEq(t.ul_r, -1)
-    @assertEq(t.ul_g, -1)
-    @assertEq(t.ul_b, -1)
+    @assertEq(t.ul_type, COLOR_NONE)
+    @assertEq(t.ul_val, 0)
     // Write a char — cell should NOT have custom underline color flag
     p.feed(t, 'B')
     @assert((t.grid.getCell(0, 0).flags & CELL_CUSTOM_UL_COLOR) == 0)
