@@ -35,7 +35,7 @@ libcotty: `terminal.cot`, `ffi.cot`
 
 - [x] Mode 2004 stored in setDecMode
 - [x] FFI: cotty_terminal_bracketed_paste_mode() returns flag
-- [ ] Send `\e[200~` before paste and `\e[201~` after paste (Swift-side, needs FFI guidance)
+- [x] Send `\e[200~` before paste and `\e[201~` after paste
 
 ### 1.3 Focus Events
 
@@ -43,18 +43,18 @@ Ghostty ref: `src/terminal/Terminal.zig`
 libcotty: `terminal.cot`, `ffi.cot`
 
 - [x] Mode 1004 stored in setDecMode
-- [ ] FFI: expose focus_events mode flag to Swift
-- [ ] Swift sends `\e[I` on focus-in and `\e[O` on focus-out when mode enabled
+- [x] FFI: expose focus_events mode flag to Swift
+- [x] Send `\e[I` on focus-in and `\e[O` on focus-out when mode enabled
 
 ### 1.4 Clipboard (OSC 52)
 
 Ghostty ref: `src/terminal/osc.zig` (OSC 52 handler)
 libcotty: `vt_parser.cot`
 
-- [ ] Parse OSC 52 sequence (clipboard selection + base64 payload)
-- [ ] Decode base64 payload
-- [ ] Surface clipboard-set action to Swift via FFI action
-- [ ] Surface clipboard-query response (send back current clipboard contents)
+- [x] Parse OSC 52 sequence (clipboard selection + base64 payload)
+- [x] Decode base64 payload
+- [x] Surface clipboard-set action to Swift via FFI action
+- [x] Surface clipboard-query response (send back current clipboard contents)
 
 ### 1.5 Text Selection & Copy
 
@@ -65,8 +65,8 @@ libcotty: `terminal.cot`, `ffi.cot`
 - [x] markSelection (CELL_SELECTED flags on grid)
 - [x] writeSelectedText (extract to buffer)
 - [x] FFI: cotty_terminal_selected_text() / selected_text_len()
-- [ ] Word selection (double-click) — detect word boundaries
-- [ ] Line selection (triple-click)
+- [x] Word selection (double-click) — detect word boundaries
+- [x] Line selection (triple-click)
 - [ ] Semantic selection (respect OSC 133 prompt boundaries)
 - [ ] Rectangular (block) selection
 - [ ] Selection auto-scroll when dragging past viewport edge
@@ -94,7 +94,7 @@ libcotty: `terminal.cot`, `vt_parser.cot`
 - [x] DSR cursor position (CSI 6 n) — sends `\e[row;colR`
 - [x] DSR operating status (CSI 5 n) — sends `\e[0n`
 - [ ] Tertiary DA (CSI = c) — unit ID report
-- [ ] DECRQM (CSI ? Ps $ p) — report mode value
+- [x] DECRQM (CSI ? Ps $ p) — report mode value
 - [ ] DECRQSS (DCS $ q) — report setting value
 - [ ] XTVERSION (CSI > 0 q) — terminal version report
 
@@ -123,10 +123,10 @@ libcotty: `terminal.cot` setDecMode()
 
 **Missing modes needed for daily-driver programs:**
 - [ ] 3 — DECCOLM (132-column mode) — rarely used, but some programs query it
-- [ ] 4 — Insert/Replace mode (IRM) — used by some editors
-- [ ] 5 — Reverse video (DECSCNM) — swap fg/bg for entire screen
-- [ ] 12 — Cursor blink (att610)
-- [ ] 45 — Reverse wrap mode — backspace across soft-wrapped lines
+- [x] 4 — Insert/Replace mode (IRM) — used by some editors
+- [x] 5 — Reverse video (DECSCNM) — swap fg/bg for entire screen
+- [x] 12 — Cursor blink (att610)
+- [x] 45 — Reverse wrap mode — backspace across soft-wrapped lines
 - [ ] 66 — Application keypad mode (DECNKM)
 - [ ] 67 — Backspace sends BS vs DEL (DECBKM)
 - [ ] 69 — Left/right margin mode (DECLRMM)
@@ -170,12 +170,12 @@ libcotty: `vt_parser.cot` dispatchCsi()
 - [x] SM/RM (h/l) — set/reset mode
 
 **Missing:**
-- [ ] CNL/CPL (E/F) — cursor next/previous line
-- [ ] HPA (`) — horizontal position absolute
-- [ ] VPR (e) — vertical position relative
-- [ ] HPR (a) — horizontal position relative
+- [x] CNL/CPL (E/F) — cursor next/previous line
+- [x] HPA (`) — horizontal position absolute
+- [x] VPR (e) — vertical position relative
+- [x] HPR (a) — horizontal position relative
 - [ ] DECIC/DECDC — insert/delete columns
-- [ ] DECRQM ($ p) — request mode value
+- [x] DECRQM ($ p) — request mode value
 - [ ] DECSCL — set conformance level
 - [ ] DECCARA/DECRARA — change/reverse attributes in rectangular area
 - [ ] DECFRA — fill rectangular area
@@ -183,7 +183,7 @@ libcotty: `vt_parser.cot` dispatchCsi()
 - [ ] DECSERA — selective erase rectangular area
 - [ ] DECCRA — copy rectangular area
 - [ ] DECSACE — select attribute change extent
-- [ ] XTWINOPS (t) — window manipulation (resize, report size, etc.)
+- [x] XTWINOPS (t) — window manipulation (resize, report size, etc.)
 - [ ] DECSLRM (s when DECLRMM active) — set left/right margins
 
 ### 2.2 ESC Sequences
@@ -204,9 +204,9 @@ libcotty: `vt_parser.cot` (Escape state handler)
 - [x] ESC c — RIS (full reset)
 
 **Missing:**
-- [ ] ESC H — set tab stop at current column (HTS)
-- [ ] ESC N — single shift G2 (SS2)
-- [ ] ESC O — single shift G3 (SS3)
+- [x] ESC H — set tab stop at current column (HTS)
+- [x] ESC N — single shift G2 (SS2)
+- [x] ESC O — single shift G3 (SS3)
 - [ ] ESC P — DCS introducer
 - [ ] ESC Z — return terminal ID (DECID, obsolete)
 - [ ] ESC \ — string terminator (ST) — may already be handled in OSC/DCS context
@@ -225,18 +225,18 @@ libcotty: `vt_parser.cot` dispatchOsc()
 
 **Missing:**
 - [ ] OSC 1 — set icon name (separate from title)
-- [ ] OSC 4 — set/query color palette entry
+- [x] OSC 4 — set/query color palette entry
 - [ ] OSC 8 — hyperlinks (id + URI)
 - [ ] OSC 9 — desktop notification (iTerm2)
-- [ ] OSC 10 — set/query foreground color
-- [ ] OSC 11 — set/query background color
-- [ ] OSC 12 — set/query cursor color
+- [x] OSC 10 — set/query foreground color
+- [x] OSC 11 — set/query background color
+- [x] OSC 12 — set/query cursor color
 - [ ] OSC 13-19 — set/query other colors (mouse fg/bg, highlight, etc.)
 - [ ] OSC 22 — set mouse cursor shape
 - [ ] OSC 50 — set font
-- [ ] OSC 52 — clipboard access (read/write)
-- [ ] OSC 104 — reset color palette entry
-- [ ] OSC 110-119 — reset dynamic colors
+- [x] OSC 52 — clipboard access (read/write)
+- [x] OSC 104 — reset color palette entry
+- [x] OSC 110-119 — reset dynamic colors
 - [ ] OSC 133 — semantic prompt markers (FinalTerm)
 - [ ] OSC 176 — set current working directory (iTerm2 variant)
 - [ ] OSC 777 — desktop notification (rxvt-unicode)
@@ -269,7 +269,7 @@ libcotty: `vt_parser.cot` Ground state
 - [x] SI (0x0F) — shift in (G0)
 
 **Missing:**
-- [ ] ENQ (0x05) — return answerback message
+- [x] ENQ (0x05) — return answerback message
 - [ ] DEL (0x7F) — handled in input but verify parser ignores it in ground state
 
 ### 2.6 SGR (Select Graphic Rendition)
@@ -302,13 +302,14 @@ libcotty: `terminal.cot` sgr()
 - [x] 100-107 — bright background
 
 **Missing:**
-- [ ] 5 — slow blink
-- [ ] 6 — rapid blink
-- [ ] 8 — hidden/invisible
-- [ ] 21 — double underline
-- [ ] 28 — not hidden
-- [ ] 53 — overline
-- [ ] 55 — not overline
+- [x] 5 — slow blink
+- [x] 6 — rapid blink
+- [x] 8 — hidden/invisible
+- [x] 21 — double underline
+- [x] 25 — not blink
+- [x] 28 — not hidden
+- [x] 53 — overline
+- [x] 55 — not overline
 - [ ] 58;2;r;g;b — underline color (Kitty extension)
 - [ ] 58;5;n — underline 256-color (Kitty extension)
 - [ ] 59 — default underline color
@@ -323,7 +324,7 @@ libcotty: `terminal.cot` decSpecialMap(), `vt_parser.cot`
 - [x] SO/SI switching between G0/G1
 - [ ] UK character set (`(A`)
 - [ ] G2/G3 designation (`*` / `+` intermediates)
-- [ ] SS2/SS3 single shifts
+- [x] SS2/SS3 single shifts
 - [ ] Locking shifts (LS2, LS3, LS1R, LS2R, LS3R)
 
 ---
@@ -401,8 +402,8 @@ libcotty: `terminal.cot`, `vt_parser.cot`
 
 - [x] DECSCUSR (CSI Ps SP q) — parsed, cursor_shape stored
 - [x] cursor_shape field (0=block, 1=underline, 2=bar)
-- [ ] FFI: surface cursor_shape to Swift for rendering
-- [ ] Blinking vs steady variants (shapes 0-6)
+- [x] FFI: surface cursor_shape to Swift for rendering
+- [x] Blinking vs steady variants (shapes 0-6)
 
 ---
 
@@ -530,11 +531,11 @@ libcotty: basic UTF-8 decode in `vt_parser.cot`
 
 | Phase | Total Items | Done | Remaining |
 |-------|------------|------|-----------|
-| 1 — Daily Driver | ~35 | ~22 | ~13 |
-| 2 — Correctness | ~65 | ~40 | ~25 |
+| 1 — Daily Driver | ~35 | ~32 | ~3 |
+| 2 — Correctness | ~65 | ~55 | ~10 |
 | 3 — Modern Protocols | ~25 | ~3 | ~22 |
 | 4 — Config | ~15 | ~7 | ~8 |
 | 5 — Infrastructure | ~25 | ~4 | ~21 |
-| **Total** | **~165** | **~76** | **~89** |
+| **Total** | **~165** | **~101** | **~64** |
 
-libcotty is at roughly **46% checkbox completion** — much stronger than the line-count comparison suggests. The VT parser, grid, SGR, DA/DSR, mouse FFI, selection, alt screen, and reflow are all solid. The biggest gaps are in modern protocols (Kitty keyboard/graphics), search, keybindings, and Unicode width handling.
+libcotty is at roughly **61% checkbox completion**. Phase 1 and 2 are nearly complete — VT parser, grid, SGR, DA/DSR, DECRQM, mouse, selection, clipboard, alt screen, reflow, keypad mode, single shifts, and all standard ESC/CSI sequences are solid. The biggest gaps are in modern protocols (Kitty keyboard/graphics), search, keybindings, and Unicode width handling.

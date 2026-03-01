@@ -224,6 +224,116 @@ fn initTabstops(cols: i64) List(i64) {
 }
 
 // ============================================================================
+// Word boundary detection for selection
+// ============================================================================
+
+/// Check if a codepoint is a word boundary character for double-click selection.
+/// Default separators match Ghostty: |`"'&;:,./<>(){}[]@
+fn isWordBoundary(cp: i64) bool {
+    return (cp == '|' or cp == '`' or cp == '"' or cp == '\'' or
+            cp == '&' or cp == ';' or cp == ':' or cp == ',' or
+            cp == '.' or cp == '/' or cp == '<' or cp == '>' or
+            cp == '(' or cp == ')' or cp == '{' or cp == '}' or
+            cp == '[' or cp == ']' or cp == '@')
+}
+
+// ============================================================================
+// Base64 decoding for OSC 52
+// ============================================================================
+
+/// Decode a single base64 character to its 6-bit value. Returns -1 for invalid/padding.
+fn base64CharVal(ch: i64) i64 {
+    if (ch >= 'A' and ch <= 'Z') { return ch - 'A' }
+    if (ch >= 'a' and ch <= 'z') { return ch - 'a' + 26 }
+    if (ch >= '0' and ch <= '9') { return ch - '0' + 52 }
+    if (ch == '+') { return 62 }
+    if (ch == '/') { return 63 }
+    return -1
+}
+
+/// Decode base64 data from buf[start..start+len] into out_ptr.
+/// Returns the number of decoded bytes written.
+fn base64Decode(buf: List(i64), start: i64, len: i64, out_ptr: i64) i64 {
+    var pos: i64 = 0
+    var i = start
+    const end = start + len
+    while (i + 3 < end) {
+        const a = base64CharVal(buf.get(i))
+        const b = base64CharVal(buf.get(i + 1))
+        const c = base64CharVal(buf.get(i + 2))
+        const d = base64CharVal(buf.get(i + 3))
+
+        if (a < 0 or b < 0) {
+            i += 4
+            continue
+        }
+
+        // First byte always produced
+        @intToPtr(*u8, out_ptr + pos).* = @intCast(u8, (a << 2) | (b >> 4))
+        pos += 1
+
+        // Second byte if c is valid
+        if (c >= 0) {
+            @intToPtr(*u8, out_ptr + pos).* = @intCast(u8, ((b & 0x0F) << 4) | (c >> 2))
+            pos += 1
+        }
+
+        // Third byte if d is valid
+        if (d >= 0) {
+            @intToPtr(*u8, out_ptr + pos).* = @intCast(u8, ((c & 0x03) << 6) | d)
+            pos += 1
+        }
+
+        i += 4
+    }
+    return pos
+}
+
+// ============================================================================
+// Color spec parsing for OSC 4/10/11/12
+// ============================================================================
+
+/// Parse a hex digit character to its value (0-15). Returns -1 for invalid.
+fn hexVal(ch: i64) i64 {
+    if (ch >= '0' and ch <= '9') { return ch - '0' }
+    if (ch >= 'a' and ch <= 'f') { return ch - 'a' + 10 }
+    if (ch >= 'A' and ch <= 'F') { return ch - 'A' + 10 }
+    return -1
+}
+
+/// Parse an X11 color spec from buf[start..start+len].
+/// Supports "rgb:RR/GG/BB" and "#RRGGBB" formats.
+/// Returns (r, g, b) or (-1, -1, -1) on parse failure.
+fn parseColorSpec(buf: List(i64), start: i64, len: i64) (i64, i64, i64) {
+    if (len < 7) { return (-1, -1, -1) }
+
+    // Check for "#RRGGBB" format
+    if (buf.get(start) == '#' and len >= 7) {
+        const r = hexVal(buf.get(start + 1)) * 16 + hexVal(buf.get(start + 2))
+        const g = hexVal(buf.get(start + 3)) * 16 + hexVal(buf.get(start + 4))
+        const b = hexVal(buf.get(start + 5)) * 16 + hexVal(buf.get(start + 6))
+        if (r < 0 or g < 0 or b < 0) { return (-1, -1, -1) }
+        return (r, g, b)
+    }
+
+    // Check for "rgb:RR/GG/BB" format (len >= 12: "rgb:" + "RR/GG/BB")
+    if (len >= 12) {
+        if (buf.get(start) == 'r' and buf.get(start + 1) == 'g' and
+            buf.get(start + 2) == 'b' and buf.get(start + 3) == ':') {
+            const r = hexVal(buf.get(start + 4)) * 16 + hexVal(buf.get(start + 5))
+            if (buf.get(start + 6) != '/') { return (-1, -1, -1) }
+            const g = hexVal(buf.get(start + 7)) * 16 + hexVal(buf.get(start + 8))
+            if (buf.get(start + 9) != '/') { return (-1, -1, -1) }
+            const b = hexVal(buf.get(start + 10)) * 16 + hexVal(buf.get(start + 11))
+            if (r < 0 or g < 0 or b < 0) { return (-1, -1, -1) }
+            return (r, g, b)
+        }
+    }
+
+    return (-1, -1, -1)
+}
+
+// ============================================================================
 // TerminalState — cursor, attributes, scroll region, pending wrap
 // ============================================================================
 
@@ -248,6 +358,10 @@ struct TerminalState {
     underline: bool,
     inverse: bool,
     strikethrough: bool,
+    blink: bool,
+    hidden: bool,
+    overline: bool,
+    double_underline: bool,
     default_fg_r: i64,
     default_fg_g: i64,
     default_fg_b: i64,
@@ -275,6 +389,12 @@ struct TerminalState {
     mode_origin: bool,
     mode_wraparound: bool,
     mode_mouse_alt_scroll: bool,
+    mode_insert: bool,
+    mode_reverse_video: bool,
+    mode_cursor_blinking: bool,
+    mode_reverse_wrap: bool,
+    mode_app_keypad: bool,
+    single_shift: i64,
     charset_g0: i64,
     charset_g1: i64,
     active_charset: i64,
@@ -283,6 +403,11 @@ struct TerminalState {
     previous_char: i64,
     title_buf: i64,
     title_len: i64,
+    title_stack_buf: i64,
+    title_stack_len: i64,
+    clipboard_buf: i64,
+    clipboard_len: i64,
+    clipboard_request: i64,
     bell_pending: bool,
     alt_grid: TerminalGrid,
     alt_cursor_row: i64,
@@ -314,6 +439,10 @@ struct TerminalState {
             underline: false,
             inverse: false,
             strikethrough: false,
+            blink: false,
+            hidden: false,
+            overline: false,
+            double_underline: false,
             default_fg_r: THEME_FG_R,
             default_fg_g: THEME_FG_G,
             default_fg_b: THEME_FG_B,
@@ -341,6 +470,12 @@ struct TerminalState {
             mode_origin: false,
             mode_wraparound: true,
             mode_mouse_alt_scroll: true,
+            mode_insert: false,
+            mode_reverse_video: false,
+            mode_cursor_blinking: false,
+            mode_reverse_wrap: false,
+            mode_app_keypad: false,
+            single_shift: 0,
             charset_g0: 0,
             charset_g1: 0,
             active_charset: 0,
@@ -349,6 +484,11 @@ struct TerminalState {
             previous_char: 0,
             title_buf: 0,
             title_len: 0,
+            title_stack_buf: 0,
+            title_stack_len: 0,
+            clipboard_buf: 0,
+            clipboard_len: 0,
+            clipboard_request: 0,
             bell_pending: false,
             alt_grid: TerminalGrid.init(0, 0),
             alt_cursor_row: 0,
@@ -369,7 +509,15 @@ struct TerminalState {
         // Apply DEC Special Graphics charset mapping
         var mapped = cp
         var charset: i64 = self.charset_g0
-        if (self.active_charset == 1) { charset = self.charset_g1 }
+        if (self.single_shift == 2) {
+            charset = 0  // G2 (ASCII by default)
+            self.single_shift = 0
+        } else if (self.single_shift == 3) {
+            charset = 0  // G3 (ASCII by default)
+            self.single_shift = 0
+        } else if (self.active_charset == 1) {
+            charset = self.charset_g1
+        }
         if (charset == 1 and mapped >= 0x60 and mapped <= 0x7E) {
             mapped = decSpecialMap(mapped)
         }
@@ -390,6 +538,13 @@ struct TerminalState {
             }
         }
 
+        // Insert mode (IRM): shift existing content right before writing
+        if (self.mode_insert) {
+            if (self.cursor_col < self.grid.cols - 1) {
+                self.insertBlanks(1)
+            }
+        }
+
         const c = self.grid.getCell(self.cursor_row, self.cursor_col)
         c.codepoint = mapped
         c.fg_r = self.fg_r
@@ -405,6 +560,10 @@ struct TerminalState {
         if (self.underline) { c.flags = c.flags | CELL_UNDERLINE }
         if (self.inverse) { c.flags = c.flags | CELL_INVERSE }
         if (self.strikethrough) { c.flags = c.flags | CELL_STRIKETHROUGH }
+        if (self.blink) { c.flags = c.flags | CELL_BLINK }
+        if (self.hidden) { c.flags = c.flags | CELL_HIDDEN }
+        if (self.overline) { c.flags = c.flags | CELL_OVERLINE }
+        if (self.double_underline) { c.flags = c.flags | CELL_DOUBLE_UNDERLINE }
 
         self.previous_char = mapped
 
@@ -435,10 +594,18 @@ struct TerminalState {
     }
 
     /// Backspace (BS): move cursor left by one column.
+    /// In reverse wrap mode (mode 45), wraps to end of previous soft-wrapped line.
     fn backspace() void {
         self.pending_wrap = false
         if (self.cursor_col > 0) {
             self.cursor_col -= 1
+        } else if (self.mode_reverse_wrap) {
+            if (self.cursor_row > 0) {
+                if (self.grid.getRowWrap(self.cursor_row - 1) == 1) {
+                    self.cursor_row -= 1
+                    self.cursor_col = self.grid.cols - 1
+                }
+            }
         }
     }
 
@@ -736,6 +903,10 @@ struct TerminalState {
         self.underline = false
         self.inverse = false
         self.strikethrough = false
+        self.blink = false
+        self.hidden = false
+        self.overline = false
+        self.double_underline = false
     }
 
     // -- Bell ---------------------------------------------------------------
@@ -780,6 +951,12 @@ struct TerminalState {
         self.mode_origin = false
         self.mode_wraparound = true
         self.mode_mouse_alt_scroll = true
+        self.mode_insert = false
+        self.mode_reverse_video = false
+        self.mode_cursor_blinking = false
+        self.mode_reverse_wrap = false
+        self.mode_app_keypad = false
+        self.single_shift = 0
         self.scroll_top = 0
         self.scroll_bottom = self.grid.rows - 1
         self.charset_g0 = 0
@@ -840,8 +1017,53 @@ struct TerminalState {
             2004 => { self.mode_bracketed_paste = enable },
             2026 => { self.mode_sync_output = enable },
             1007 => { self.mode_mouse_alt_scroll = enable },
+            5 => { self.mode_reverse_video = enable },
+            12 => { self.mode_cursor_blinking = enable },
+            45 => { self.mode_reverse_wrap = enable },
             else => {},
         }
+    }
+
+    /// Set or reset a standard ANSI mode (CSI h/l without ? prefix).
+    fn setAnsiMode(mode: i64, enable: bool) void {
+        switch (mode) {
+            4 => { self.mode_insert = enable },
+            else => {},
+        }
+    }
+
+    /// Query DEC private mode value. Returns 1 (set), 2 (reset), 0 (not recognized).
+    fn queryDecMode(mode: i64) i64 {
+        return switch (mode) {
+            1 => { if (self.mode_app_cursor) { return 1 } else { return 2 } },
+            5 => { if (self.mode_reverse_video) { return 1 } else { return 2 } },
+            6 => { if (self.mode_origin) { return 1 } else { return 2 } },
+            7 => { if (self.mode_wraparound) { return 1 } else { return 2 } },
+            12 => { if (self.mode_cursor_blinking) { return 1 } else { return 2 } },
+            25 => { if (self.cursor_visible) { return 1 } else { return 2 } },
+            45 => { if (self.mode_reverse_wrap) { return 1 } else { return 2 } },
+            47, 1047 => { if (self.mode_alt_screen) { return 1 } else { return 2 } },
+            1000 => { if (self.mode_mouse_tracking == 1000) { return 1 } else { return 2 } },
+            1002 => { if (self.mode_mouse_tracking == 1002) { return 1 } else { return 2 } },
+            1003 => { if (self.mode_mouse_tracking == 1003) { return 1 } else { return 2 } },
+            1004 => { if (self.mode_focus_events) { return 1 } else { return 2 } },
+            1006 => { if (self.mode_mouse_format == 1006) { return 1 } else { return 2 } },
+            1007 => { if (self.mode_mouse_alt_scroll) { return 1 } else { return 2 } },
+            1049 => { if (self.mode_alt_screen) { return 1 } else { return 2 } },
+            2004 => { if (self.mode_bracketed_paste) { return 1 } else { return 2 } },
+            2026 => { if (self.mode_sync_output) { return 1 } else { return 2 } },
+            else => 0,
+        }
+    }
+
+    /// Send DEC mode report: ESC [ ? Ps ; Pm $ y
+    fn sendModeReport(mode: i64, value: i64) void {
+        if (self.pty_fd < 0) { return }
+        writeStr(self.pty_fd, "\x1b[?")
+        self.writeDecimal(self.pty_fd, mode)
+        writeStr(self.pty_fd, ";")
+        self.writeDecimal(self.pty_fd, value)
+        writeStr(self.pty_fd, "$y")
     }
 
     /// Enter alternate screen buffer: save cursor and swap to a fresh grid.
@@ -907,6 +1129,86 @@ struct TerminalState {
     fn sendOperatingStatus() void {
         if (self.pty_fd < 0) { return }
         writeStr(self.pty_fd, "\x1b[0n")
+    }
+
+    /// Send focus gained/lost event to the PTY (CSI I / CSI O).
+    fn sendFocusEvent(focused: bool) void {
+        if (self.pty_fd < 0) { return }
+        if (!self.mode_focus_events) { return }
+        if (focused) {
+            writeStr(self.pty_fd, "\x1b[I")
+        } else {
+            writeStr(self.pty_fd, "\x1b[O")
+        }
+    }
+
+    /// Send answerback message (ENQ response). Empty like Ghostty default.
+    fn sendAnswerback() void {
+        if (self.pty_fd < 0) { return }
+        // Empty answerback (same as Ghostty default)
+    }
+
+    /// Send terminal size report in cells: ESC [ 8 ; rows ; cols t
+    fn sendTerminalSizeReport() void {
+        if (self.pty_fd < 0) { return }
+        writeStr(self.pty_fd, "\x1b[8;")
+        self.writeDecimal(self.pty_fd, self.grid.rows)
+        writeStr(self.pty_fd, ";")
+        self.writeDecimal(self.pty_fd, self.grid.cols)
+        writeStr(self.pty_fd, "t")
+    }
+
+    /// Save the current title to the title stack.
+    fn saveTitle() void {
+        if (self.title_len > 0 and self.title_buf != 0) {
+            self.title_stack_buf = alloc(self.title_stack_buf, self.title_len)
+            memcpy(self.title_stack_buf, self.title_buf, self.title_len)
+            self.title_stack_len = self.title_len
+        }
+    }
+
+    /// Restore the title from the title stack.
+    fn restoreTitle() void {
+        if (self.title_stack_len > 0 and self.title_stack_buf != 0) {
+            self.title_buf = alloc(self.title_buf, self.title_stack_len)
+            memcpy(self.title_buf, self.title_stack_buf, self.title_stack_len)
+            self.title_len = self.title_stack_len
+        }
+    }
+
+    /// Write a 2-digit hex byte value to the PTY.
+    fn writeHexByte(fd: i64, val: i64) void {
+        const hi = (val >> 4) & 0x0F
+        const lo = val & 0x0F
+        if (hi < 10) { writeByte(fd, '0' + hi) } else { writeByte(fd, 'a' + hi - 10) }
+        if (lo < 10) { writeByte(fd, '0' + lo) } else { writeByte(fd, 'a' + lo - 10) }
+    }
+
+    /// Send a color response for OSC queries: ESC ] osc_num ; rgb:RR/GG/BB ESC \
+    fn sendColorResponse(osc_num: i64, r: i64, g: i64, b: i64) void {
+        if (self.pty_fd < 0) { return }
+        writeStr(self.pty_fd, "\x1b]")
+        self.writeDecimal(self.pty_fd, osc_num)
+        writeStr(self.pty_fd, ";rgb:")
+        self.writeHexByte(self.pty_fd, r)
+        writeStr(self.pty_fd, "/")
+        self.writeHexByte(self.pty_fd, g)
+        writeStr(self.pty_fd, "/")
+        self.writeHexByte(self.pty_fd, b)
+        writeStr(self.pty_fd, "\x1b\\")
+    }
+
+    /// Decode base64 clipboard data from OSC 52 and store it.
+    fn setClipboard(buf: List(i64), start: i64, len: i64) void {
+        // Allocate decode buffer (base64 expands 4:3, so decoded <= len)
+        self.clipboard_buf = alloc(self.clipboard_buf, len)
+        self.clipboard_len = base64Decode(buf, start, len, self.clipboard_buf)
+        self.clipboard_request = 1
+    }
+
+    /// Mark that the application is querying the clipboard.
+    fn requestClipboard() void {
+        self.clipboard_request = 2
     }
 
     /// Write a decimal integer to an fd as ASCII digits.
@@ -1206,6 +1508,64 @@ struct TerminalState {
             }
             row += 1
         }
+    }
+
+    /// Select the word around (row, col). Double-click behavior.
+    /// A "word" is consecutive non-boundary codepoints. Space/null selects whitespace.
+    fn selectWord(row: i64, col: i64) void {
+        if (row < 0 or row >= self.grid.rows) { return }
+        if (col < 0 or col >= self.grid.cols) { return }
+
+        const cp = self.grid.getCell(row, col).codepoint
+        const is_space = (cp == 0 or cp == ' ' or cp == '\t')
+
+        // Expand left
+        var left_col = col
+        while (left_col > 0) {
+            const prev = self.grid.getCell(row, left_col - 1).codepoint
+            if (is_space) {
+                if (prev != 0 and prev != ' ' and prev != '\t') { break }
+            } else {
+                if (prev == 0 or prev == ' ' or prev == '\t' or isWordBoundary(prev)) { break }
+            }
+            left_col -= 1
+        }
+
+        // Expand right
+        var right_col = col
+        while (right_col < self.grid.cols - 1) {
+            const next = self.grid.getCell(row, right_col + 1).codepoint
+            if (is_space) {
+                if (next != 0 and next != ' ' and next != '\t') { break }
+            } else {
+                if (next == 0 or next == ' ' or next == '\t' or isWordBoundary(next)) { break }
+            }
+            right_col += 1
+        }
+
+        self.selectionStart(row, left_col)
+        self.selectionUpdate(row, right_col)
+    }
+
+    /// Select the entire line at row. Triple-click behavior.
+    /// For soft-wrapped lines, extends across wrap boundaries.
+    fn selectLine(row: i64) void {
+        if (row < 0 or row >= self.grid.rows) { return }
+
+        // Find the start of the logical line (go back through soft-wraps)
+        var start_row = row
+        while (start_row > 0 and self.grid.getRowWrap(start_row - 1) == 1) {
+            start_row -= 1
+        }
+
+        // Find the end of the logical line (go forward through soft-wraps)
+        var end_row = row
+        while (end_row < self.grid.rows - 1 and self.grid.getRowWrap(end_row) == 1) {
+            end_row += 1
+        }
+
+        self.selectionStart(start_row, 0)
+        self.selectionUpdate(end_row, self.grid.cols - 1)
     }
 
     /// Write selected text into a byte buffer. Returns number of bytes written.

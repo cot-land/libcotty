@@ -3,6 +3,7 @@
 
 import "std/list"
 import "std/string"
+import "std/sys"
 import "terminal"
 import "cell"
 import "inspector"
@@ -177,6 +178,7 @@ struct VtParser {
     fn executeC0(terminal: *TerminalState, b: i64) void {
         self.recordVt(VT_C0, c0Name(b), "")
         switch (b) {
+            0x05 => terminal.sendAnswerback(),
             0x07 => terminal.bell(),
             0x0D => terminal.carriageReturn(),
             0x0A, 0x0B, 0x0C => terminal.newline(),
@@ -256,6 +258,16 @@ struct VtParser {
                 terminal.mode_origin = false
                 terminal.mode_wraparound = true
                 terminal.mode_mouse_alt_scroll = true
+                terminal.mode_insert = false
+                terminal.mode_reverse_video = false
+                terminal.mode_cursor_blinking = false
+                terminal.mode_reverse_wrap = false
+                terminal.mode_app_keypad = false
+                terminal.single_shift = 0
+                terminal.blink = false
+                terminal.hidden = false
+                terminal.overline = false
+                terminal.double_underline = false
                 terminal.charset_g0 = 0
                 terminal.charset_g1 = 0
                 terminal.active_charset = 0
@@ -264,6 +276,26 @@ struct VtParser {
                 if (terminal.mode_alt_screen) {
                     terminal.leaveAltScreen()
                 }
+                self.state = VtState.Ground
+            },
+            '=' => {
+                // DECKPAM — Application Keypad Mode
+                terminal.mode_app_keypad = true
+                self.state = VtState.Ground
+            },
+            '>' => {
+                // DECKPNM — Normal Keypad Mode
+                terminal.mode_app_keypad = false
+                self.state = VtState.Ground
+            },
+            'N' => {
+                // SS2 — Single Shift G2
+                terminal.single_shift = 2
+                self.state = VtState.Ground
+            },
+            'O' => {
+                // SS3 — Single Shift G3
+                terminal.single_shift = 3
                 self.state = VtState.Ground
             },
             '\\' => {
@@ -303,8 +335,13 @@ struct VtParser {
             self.has_param = true
         } else if (b == ';') {
             self.pushParam()
-        } else if (b == '?' or b == '>' or b == '<' or b == '=' or b == ' ' or b == '!') {
-            self.intermediate = b
+        } else if (b == '?' or b == '>' or b == '<' or b == '=' or b == ' ' or b == '!' or b == '$') {
+            if (self.intermediate != 0) {
+                // Stack intermediates: e.g. ? then $ becomes ? * 256 + $
+                self.intermediate = self.intermediate * 256 + b
+            } else {
+                self.intermediate = b
+            }
         } else if (b >= 0x40 and b <= 0x7E) {
             if (self.has_param or self.params.count > 0) {
                 self.pushParam()
@@ -344,17 +381,35 @@ struct VtParser {
             'B' => terminal.cursorDown(self.param(0, 1)),
             'C' => terminal.cursorRight(self.param(0, 1)),
             'D' => terminal.cursorLeft(self.param(0, 1)),
+            'E' => {
+                // CNL — Cursor Next Line
+                terminal.cursor_col = 0
+                terminal.cursorDown(self.param(0, 1))
+            },
+            'F' => {
+                // CPL — Cursor Previous Line
+                terminal.cursor_col = 0
+                terminal.cursorUp(self.param(0, 1))
+            },
             'H', 'f' => {
                 // CUP — 1-indexed params, convert to 0-indexed
                 terminal.setCursorPos(self.param(0, 1) - 1, self.param(1, 1) - 1)
             },
-            'G' => {
-                // CHA — Cursor Horizontal Absolute (1-indexed)
+            'G', '`' => {
+                // CHA / HPA — Cursor Horizontal Absolute (1-indexed)
                 terminal.setCursorPos(terminal.cursor_row, self.param(0, 1) - 1)
+            },
+            'a' => {
+                // HPR — Horizontal Position Relative
+                terminal.cursorRight(self.param(0, 1))
             },
             'd' => {
                 // VPA — Vertical Position Absolute (1-indexed)
                 terminal.setCursorPos(self.param(0, 1) - 1, terminal.cursor_col)
+            },
+            'e' => {
+                // VPR — Vertical Position Relative
+                terminal.cursorDown(self.param(0, 1))
             },
             'J' => terminal.eraseInDisplay(self.rawParam(0, 0)),
             'K' => terminal.eraseInLine(self.rawParam(0, 0)),
@@ -438,6 +493,25 @@ struct VtParser {
                 // DECSTR — Soft Terminal Reset (with ! intermediate)
                 if (self.intermediate == '!') {
                     terminal.softReset()
+                } else if (self.intermediate == '?' * 256 + '$') {
+                    // DECRQM — Request Mode (DEC private): CSI ? Ps $ p
+                    const mode = self.rawParam(0, 0)
+                    const value = terminal.queryDecMode(mode)
+                    terminal.sendModeReport(mode, value)
+                }
+            },
+            't' => {
+                // XTWINOPS — Window manipulation
+                const op = self.rawParam(0, 0)
+                if (op == 18) {
+                    // Report terminal size in cells
+                    terminal.sendTerminalSizeReport()
+                } else if (op == 22) {
+                    // Save title to stack (param 1 = 0 or 2)
+                    terminal.saveTitle()
+                } else if (op == 23) {
+                    // Restore title from stack (param 1 = 0 or 2)
+                    terminal.restoreTitle()
                 }
             },
             'h', 'l' => self.dispatchMode(terminal, ch == 'h'),
@@ -480,10 +554,16 @@ struct VtParser {
                 terminal.italic = true
             } else if (p == 4) {
                 terminal.underline = true
+            } else if (p == 5 or p == 6) {
+                terminal.blink = true
             } else if (p == 7) {
                 terminal.inverse = true
+            } else if (p == 8) {
+                terminal.hidden = true
             } else if (p == 9) {
                 terminal.strikethrough = true
+            } else if (p == 21) {
+                terminal.double_underline = true
             } else if (p == 22) {
                 terminal.bold = false
                 terminal.dim = false
@@ -491,10 +571,19 @@ struct VtParser {
                 terminal.italic = false
             } else if (p == 24) {
                 terminal.underline = false
+                terminal.double_underline = false
+            } else if (p == 25) {
+                terminal.blink = false
             } else if (p == 27) {
                 terminal.inverse = false
+            } else if (p == 28) {
+                terminal.hidden = false
             } else if (p == 29) {
                 terminal.strikethrough = false
+            } else if (p == 53) {
+                terminal.overline = true
+            } else if (p == 55) {
+                terminal.overline = false
             } else if (p >= 30 and p <= 37) {
                 const r, g, b = basicColor(p - 30, terminal.palette)
                 terminal.fg_r = r
@@ -575,13 +664,21 @@ struct VtParser {
 
     // -- Mode dispatch (CSI ? h/l) ------------------------------------------
 
-    /// Handle set/reset mode. Only DEC private modes (? prefix) for now.
+    /// Handle set/reset mode. DEC private modes (? prefix) and standard ANSI modes.
     fn dispatchMode(terminal: *TerminalState, enable: bool) void {
-        if (self.intermediate != '?') { return }
-        var i: i64 = 0
-        while (i < self.params.count) {
-            terminal.setDecMode(self.params.get(i), enable)
-            i += 1
+        if (self.intermediate == '?') {
+            var i: i64 = 0
+            while (i < self.params.count) {
+                terminal.setDecMode(self.params.get(i), enable)
+                i += 1
+            }
+        } else if (self.intermediate == 0) {
+            // Standard ANSI modes (e.g., mode 4 = IRM)
+            var i: i64 = 0
+            while (i < self.params.count) {
+                terminal.setAnsiMode(self.params.get(i), enable)
+                i += 1
+            }
         }
     }
 
@@ -631,7 +728,120 @@ struct VtParser {
             terminal.setTitle(self.osc_buf, payload_start, payload_len)
         } else if (cmd == 7) {
             terminal.setPwd(self.osc_buf, payload_start, payload_len)
+        } else if (cmd == 4) {
+            // OSC 4 — Set/query color palette entry: 4;index;spec
+            self.handleOscPaletteColor(terminal, payload_start, payload_len)
+        } else if (cmd == 10) {
+            // OSC 10 — Set/query foreground color
+            if (payload_len > 0 and self.osc_buf.get(payload_start) == '?') {
+                terminal.sendColorResponse(10, terminal.default_fg_r, terminal.default_fg_g, terminal.default_fg_b)
+            } else if (payload_len >= 7) {
+                const r, g, b = parseColorSpec(self.osc_buf, payload_start, payload_len)
+                if (r >= 0) {
+                    terminal.default_fg_r = r
+                    terminal.default_fg_g = g
+                    terminal.default_fg_b = b
+                }
+            }
+        } else if (cmd == 11) {
+            // OSC 11 — Set/query background color
+            if (payload_len > 0 and self.osc_buf.get(payload_start) == '?') {
+                terminal.sendColorResponse(11, terminal.default_bg_r, terminal.default_bg_g, terminal.default_bg_b)
+            } else if (payload_len >= 7) {
+                const r, g, b = parseColorSpec(self.osc_buf, payload_start, payload_len)
+                if (r >= 0) {
+                    terminal.default_bg_r = r
+                    terminal.default_bg_g = g
+                    terminal.default_bg_b = b
+                }
+            }
+        } else if (cmd == 12) {
+            // OSC 12 — Set/query cursor color (stored for renderer)
+            if (payload_len > 0 and self.osc_buf.get(payload_start) == '?') {
+                // Respond with current cursor color — use fg as proxy
+                terminal.sendColorResponse(12, terminal.default_fg_r, terminal.default_fg_g, terminal.default_fg_b)
+            }
+        } else if (cmd == 52) {
+            // OSC 52 — Clipboard
+            self.handleOsc52(terminal, payload_start, payload_len)
+        } else if (cmd == 104) {
+            // OSC 104 — Reset color palette entry (no-op for now, palette is static)
+        } else if (cmd == 110) {
+            // OSC 110 — Reset foreground color to config defaults
+            terminal.default_fg_r = THEME_FG_R
+            terminal.default_fg_g = THEME_FG_G
+            terminal.default_fg_b = THEME_FG_B
+        } else if (cmd == 111) {
+            // OSC 111 — Reset background color to config defaults
+            terminal.default_bg_r = THEME_BG_R
+            terminal.default_bg_g = THEME_BG_G
+            terminal.default_bg_b = THEME_BG_B
+        } else if (cmd == 112) {
+            // OSC 112 — Reset cursor color (no-op, uses config)
         }
+    }
+
+    /// Handle OSC 4 — set/query palette color entry.
+    /// Format: index;colorspec (e.g. "1;rgb:ff/00/00")
+    fn handleOscPaletteColor(terminal: *TerminalState, start: i64, len: i64) void {
+        // Parse palette index
+        var idx: i64 = 0
+        var i = start
+        const end = start + len
+        while (i < end and self.osc_buf.get(i) != ';') {
+            const ch = self.osc_buf.get(i)
+            if (ch >= '0' and ch <= '9') {
+                idx = idx * 10 + (ch - '0')
+            }
+            i += 1
+        }
+        if (i >= end) { return }
+        i += 1  // skip ';'
+
+        if (idx < 0 or idx > 255) { return }
+
+        // Check for query
+        if (i < end and self.osc_buf.get(i) == '?') {
+            const r, g, b = colorFromIndex(idx, terminal.palette)
+            terminal.sendColorResponse(4, r, g, b)
+            return
+        }
+
+        // Parse color spec
+        const spec_len = end - i
+        const r, g, b = parseColorSpec(self.osc_buf, i, spec_len)
+        if (r >= 0 and idx < 16) {
+            // Update palette for basic colors (indices 0-15)
+            const base = idx * 3
+            @intToPtr(*i64, terminal.palette.items + base * @sizeOf(i64)).* = r
+            @intToPtr(*i64, terminal.palette.items + (base + 1) * @sizeOf(i64)).* = g
+            @intToPtr(*i64, terminal.palette.items + (base + 2) * @sizeOf(i64)).* = b
+        }
+    }
+
+    /// Handle OSC 52 — clipboard operations.
+    /// Format: selection;base64data (selection is typically 'c' for clipboard)
+    fn handleOsc52(terminal: *TerminalState, start: i64, len: i64) void {
+        // Skip selection parameter (e.g. 'c', 's', 'p') up to ';'
+        var i = start
+        const end = start + len
+        while (i < end and self.osc_buf.get(i) != ';') {
+            i += 1
+        }
+        if (i >= end) { return }
+        i += 1  // skip ';'
+
+        const data_len = end - i
+        if (data_len == 0) { return }
+
+        // Query: '?' means application wants clipboard contents
+        if (data_len == 1 and self.osc_buf.get(i) == '?') {
+            terminal.requestClipboard()
+            return
+        }
+
+        // Set clipboard: decode base64 data
+        terminal.setClipboard(self.osc_buf, i, data_len)
     }
 
     // -- Parameter helpers --------------------------------------------------
@@ -1004,4 +1214,403 @@ test "mixed text and formatting" {
     @assertEq(t.grid.getCell(0, 2).codepoint, '!')
     @assertEq(t.grid.getCell(0, 2).fg_r, t.default_fg_r)
     @assertEq(t.grid.getCell(0, 2).flags, 0)
+}
+
+// ============================================================================
+// Tests — Insert mode (IRM)
+// ============================================================================
+
+test "insert mode shifts cells" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 6)
+    p.feedBytes(t, "ABCD")
+    t.setCursorPos(0, 1)
+    // Enable insert mode via ANSI mode 4
+    p.feedEsc(t, "[4h")
+    @assertEq(t.mode_insert, true)
+    // Insert 'X' — should shift BCD right
+    p.feedBytes(t, "X")
+    @assertEq(t.grid.getCell(0, 0).codepoint, 'A')
+    @assertEq(t.grid.getCell(0, 1).codepoint, 'X')
+    @assertEq(t.grid.getCell(0, 2).codepoint, 'B')
+    @assertEq(t.grid.getCell(0, 3).codepoint, 'C')
+    @assertEq(t.grid.getCell(0, 4).codepoint, 'D')
+    // Disable insert mode
+    p.feedEsc(t, "[4l")
+    @assertEq(t.mode_insert, false)
+}
+
+// ============================================================================
+// Tests — Reverse wrap (mode 45)
+// ============================================================================
+
+test "reverse wrap moves to previous row" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 4)
+    // Write "ABCD" which fills row 0 and causes soft-wrap flag
+    p.feedBytes(t, "ABCD")
+    // Wrap flag should be set on row 0 after writing at last col
+    t.grid.setRowWrap(0, 1)
+    // Move to start of row 1
+    t.setCursorPos(1, 0)
+    // Enable reverse wrap
+    p.feedEsc(t, "[?45h")
+    @assertEq(t.mode_reverse_wrap, true)
+    // Backspace should wrap to end of row 0
+    t.backspace()
+    @assertEq(t.cursor_row, 0)
+    @assertEq(t.cursor_col, 3)
+}
+
+test "reverse wrap no wrap without soft-wrap flag" {
+    var t = TerminalState.init(3, 4)
+    t.mode_reverse_wrap = true
+    t.setCursorPos(1, 0)
+    // Row 0 has no soft-wrap flag (default = 0)
+    t.backspace()
+    // Should stay at row 1, col 0
+    @assertEq(t.cursor_row, 1)
+    @assertEq(t.cursor_col, 0)
+}
+
+// ============================================================================
+// Tests — DECSCNM (reverse video) and cursor blink
+// ============================================================================
+
+test "DECSCNM mode 5" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 4)
+    p.feedEsc(t, "[?5h")
+    @assertEq(t.mode_reverse_video, true)
+    p.feedEsc(t, "[?5l")
+    @assertEq(t.mode_reverse_video, false)
+}
+
+test "cursor blink mode 12" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 4)
+    p.feedEsc(t, "[?12h")
+    @assertEq(t.mode_cursor_blinking, true)
+    p.feedEsc(t, "[?12l")
+    @assertEq(t.mode_cursor_blinking, false)
+}
+
+// ============================================================================
+// Tests — CSI E/F (CNL/CPL)
+// ============================================================================
+
+test "CSI E cursor next line" {
+    var p = VtParser.init()
+    var t = TerminalState.init(24, 80)
+    t.setCursorPos(5, 10)
+    p.feedEsc(t, "[2E")
+    @assertEq(t.cursor_row, 7)
+    @assertEq(t.cursor_col, 0)
+}
+
+test "CSI F cursor prev line" {
+    var p = VtParser.init()
+    var t = TerminalState.init(24, 80)
+    t.setCursorPos(5, 10)
+    p.feedEsc(t, "[2F")
+    @assertEq(t.cursor_row, 3)
+    @assertEq(t.cursor_col, 0)
+}
+
+// ============================================================================
+// Tests — Word/line selection
+// ============================================================================
+
+test "select word boundary" {
+    var t = TerminalState.init(3, 20)
+    // Write "hello world" at row 0
+    var p = VtParser.init()
+    p.feedBytes(t, "hello world")
+    // Select word at col 2 (inside "hello")
+    t.selectWord(0, 2)
+    @assertEq(t.sel_active, true)
+    @assertEq(t.sel_start_col, 0)
+    @assertEq(t.sel_end_col, 4)
+    @assertEq(t.sel_start_row, 0)
+}
+
+test "select word with punctuation" {
+    var t = TerminalState.init(3, 20)
+    var p = VtParser.init()
+    p.feedBytes(t, "foo(bar)baz")
+    // Select word at col 4 (inside "bar", bounded by parens)
+    t.selectWord(0, 4)
+    @assertEq(t.sel_start_col, 4)
+    @assertEq(t.sel_end_col, 6)
+}
+
+test "select line" {
+    var t = TerminalState.init(5, 10)
+    var p = VtParser.init()
+    p.feedBytes(t, "hello")
+    t.selectLine(0)
+    @assertEq(t.sel_active, true)
+    @assertEq(t.sel_start_row, 0)
+    @assertEq(t.sel_start_col, 0)
+    @assertEq(t.sel_end_row, 0)
+    @assertEq(t.sel_end_col, 9)
+}
+
+// ============================================================================
+// Tests — Base64 decode
+// ============================================================================
+
+test "base64 decode" {
+    // "SGVsbG8=" decodes to "Hello"
+    var buf: List(i64) = .{}
+    buf.append('S')
+    buf.append('G')
+    buf.append('V')
+    buf.append('s')
+    buf.append('b')
+    buf.append('G')
+    buf.append('8')
+    buf.append('=')
+    const out = alloc(0, 8)
+    const len = base64Decode(buf, 0, 8, out)
+    @assertEq(len, 5)
+    @assertEq(@intToPtr(*u8, out).*, 'H')
+    @assertEq(@intToPtr(*u8, out + 1).*, 'e')
+    @assertEq(@intToPtr(*u8, out + 2).*, 'l')
+    @assertEq(@intToPtr(*u8, out + 3).*, 'l')
+    @assertEq(@intToPtr(*u8, out + 4).*, 'o')
+}
+
+// ============================================================================
+// Tests — Color spec parsing
+// ============================================================================
+
+test "parse color spec hex format" {
+    var buf: List(i64) = .{}
+    // "#FF8800"
+    buf.append('#')
+    buf.append('F')
+    buf.append('F')
+    buf.append('8')
+    buf.append('8')
+    buf.append('0')
+    buf.append('0')
+    const r, g, b = parseColorSpec(buf, 0, 7)
+    @assertEq(r, 255)
+    @assertEq(g, 136)
+    @assertEq(b, 0)
+}
+
+test "parse color spec rgb format" {
+    var buf: List(i64) = .{}
+    // "rgb:ff/88/00"
+    buf.append('r')
+    buf.append('g')
+    buf.append('b')
+    buf.append(':')
+    buf.append('f')
+    buf.append('f')
+    buf.append('/')
+    buf.append('8')
+    buf.append('8')
+    buf.append('/')
+    buf.append('0')
+    buf.append('0')
+    const r, g, b = parseColorSpec(buf, 0, 12)
+    @assertEq(r, 255)
+    @assertEq(g, 136)
+    @assertEq(b, 0)
+}
+
+// ============================================================================
+// Tests — CSI t (XTWINOPS)
+// ============================================================================
+
+test "CSI t save restore title" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // Set title via OSC 0
+    p.feedEsc(t, "]0;MyTitle\x07")
+    @assertEq(t.title_len, 7)
+    // Save title: CSI 22;0 t
+    p.feedEsc(t, "[22;0t")
+    @assertEq(t.title_stack_len, 7)
+    // Change title
+    p.feedEsc(t, "]0;New\x07")
+    @assertEq(t.title_len, 3)
+    // Restore title: CSI 23;0 t
+    p.feedEsc(t, "[23;0t")
+    @assertEq(t.title_len, 7)
+}
+
+// ============================================================================
+// Tests — Soft reset clears new modes
+// ============================================================================
+
+test "soft reset clears new modes" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 4)
+    t.mode_insert = true
+    t.mode_reverse_video = true
+    t.mode_cursor_blinking = true
+    t.mode_reverse_wrap = true
+    t.mode_app_keypad = true
+    t.single_shift = 2
+    t.blink = true
+    t.hidden = true
+    t.overline = true
+    t.double_underline = true
+    t.softReset()
+    @assertEq(t.mode_insert, false)
+    @assertEq(t.mode_reverse_video, false)
+    @assertEq(t.mode_cursor_blinking, false)
+    @assertEq(t.mode_reverse_wrap, false)
+    @assertEq(t.mode_app_keypad, false)
+    @assertEq(t.single_shift, 0)
+    @assertEq(t.blink, false)
+    @assertEq(t.hidden, false)
+    @assertEq(t.overline, false)
+    @assertEq(t.double_underline, false)
+}
+
+// ============================================================================
+// Tests — Phase 2: SGR blink/hidden/overline/double-underline
+// ============================================================================
+
+test "SGR blink" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    p.feedEsc(t, "[5m")
+    @assertEq(t.blink, true)
+    p.feedBytes(t, "X")
+    @assertEq(t.grid.getCell(0, 0).flags & CELL_BLINK, CELL_BLINK)
+    p.feedEsc(t, "[25m")
+    @assertEq(t.blink, false)
+}
+
+test "SGR hidden" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    p.feedEsc(t, "[8m")
+    @assertEq(t.hidden, true)
+    p.feedBytes(t, "X")
+    @assertEq(t.grid.getCell(0, 0).flags & CELL_HIDDEN, CELL_HIDDEN)
+    p.feedEsc(t, "[28m")
+    @assertEq(t.hidden, false)
+}
+
+test "SGR overline" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    p.feedEsc(t, "[53m")
+    @assertEq(t.overline, true)
+    p.feedBytes(t, "X")
+    @assertEq(t.grid.getCell(0, 0).flags & CELL_OVERLINE, CELL_OVERLINE)
+    p.feedEsc(t, "[55m")
+    @assertEq(t.overline, false)
+}
+
+test "SGR double underline" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    p.feedEsc(t, "[21m")
+    @assertEq(t.double_underline, true)
+    p.feedBytes(t, "X")
+    @assertEq(t.grid.getCell(0, 0).flags & CELL_DOUBLE_UNDERLINE, CELL_DOUBLE_UNDERLINE)
+    // SGR 24 clears both underline and double underline
+    p.feedEsc(t, "[24m")
+    @assertEq(t.double_underline, false)
+    @assertEq(t.underline, false)
+}
+
+// ============================================================================
+// Tests — Phase 2: CSI backtick HPA, CSI a HPR, CSI e VPR
+// ============================================================================
+
+test "CSI backtick HPA" {
+    var p = VtParser.init()
+    var t = TerminalState.init(24, 80)
+    // HPA: CSI 10 ` -> col 9 (1-indexed)
+    p.feedEsc(t, "[10`")
+    @assertEq(t.cursor_col, 9)
+}
+
+test "CSI a HPR" {
+    var p = VtParser.init()
+    var t = TerminalState.init(24, 80)
+    t.setCursorPos(0, 5)
+    // HPR: CSI 3 a -> move right 3
+    p.feedEsc(t, "[3a")
+    @assertEq(t.cursor_col, 8)
+}
+
+test "CSI e VPR" {
+    var p = VtParser.init()
+    var t = TerminalState.init(24, 80)
+    t.setCursorPos(5, 0)
+    // VPR: CSI 3 e -> move down 3
+    p.feedEsc(t, "[3e")
+    @assertEq(t.cursor_row, 8)
+}
+
+// ============================================================================
+// Tests — Phase 2: ESC keypad mode
+// ============================================================================
+
+test "ESC = keypad mode" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    @assertEq(t.mode_app_keypad, false)
+    p.feedEsc(t, "=")
+    @assertEq(t.mode_app_keypad, true)
+}
+
+test "ESC > normal keypad" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    t.mode_app_keypad = true
+    p.feedEsc(t, ">")
+    @assertEq(t.mode_app_keypad, false)
+}
+
+// ============================================================================
+// Tests — Phase 2: Single shifts
+// ============================================================================
+
+test "ESC N single shift G2" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    p.feedEsc(t, "N")
+    @assertEq(t.single_shift, 2)
+    // Next printable resets single_shift
+    p.feedBytes(t, "A")
+    @assertEq(t.single_shift, 0)
+}
+
+test "ESC O single shift G3" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    p.feedEsc(t, "O")
+    @assertEq(t.single_shift, 3)
+    // Next printable resets single_shift
+    p.feedBytes(t, "A")
+    @assertEq(t.single_shift, 0)
+}
+
+// ============================================================================
+// Tests — Phase 2: DECRQM
+// ============================================================================
+
+test "DECRQM reports mode set" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // Query mode 7 (wraparound, default on) — should report 1 (set)
+    const result = t.queryDecMode(7)
+    @assertEq(result, 1)
+    // Query mode 6 (origin, default off) — should report 2 (reset)
+    const result2 = t.queryDecMode(6)
+    @assertEq(result2, 2)
+    // Query unknown mode — should report 0
+    const result3 = t.queryDecMode(9999)
+    @assertEq(result3, 0)
 }

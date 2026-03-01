@@ -10,6 +10,10 @@ const CELL_SELECTED: i64 = 8
 const CELL_DIM: i64 = 16
 const CELL_ITALIC: i64 = 32
 const CELL_STRIKETHROUGH: i64 = 64
+const CELL_BLINK: i64 = 128
+const CELL_HIDDEN: i64 = 256
+const CELL_OVERLINE: i64 = 512
+const CELL_DOUBLE_UNDERLINE: i64 = 1024
 
 struct Cell {
     codepoint: i64,

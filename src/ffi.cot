@@ -201,11 +201,9 @@ export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
 /// Insert raw UTF-8 bytes into a surface.
 export fn cotty_surface_text(surface: i64, ptr: *u8, len: i64) void {
     const sptr = getSurfacePtr(surface)
-    var i: i64 = 0
-    while (i < len) {
+    for i in 0..len {
         const byte_ptr = @intToPtr(*u8, @ptrToInt(ptr) + i)
         sptr.handleInput(InputAction.insert_char, byte_ptr.*)
-        i += 1
     }
     g_action_tag = ACTION_MARK_DIRTY
     g_action_surface = surface
@@ -219,11 +217,9 @@ export fn cotty_surface_load_content(surface: i64, ptr: *u8, len: i64) void {
     sptr.cursor = Cursor.init()
     sptr.dirty = false
     // Insert content byte by byte
-    var i: i64 = 0
-    while (i < len) {
+    for i in 0..len {
         const byte_ptr = @intToPtr(*u8, @ptrToInt(ptr) + i)
         sptr.handleInput(InputAction.insert_char, byte_ptr.*)
-        i += 1
     }
     // Reset cursor to start
     sptr.cursor.offset = 0
@@ -387,11 +383,9 @@ export fn cotty_terminal_resize(surface: i64, rows: i64, cols: i64) void {
 /// Call this after cotty_terminal_read to process shell output.
 export fn cotty_terminal_feed(surface: i64, ptr: *u8, len: i64) void {
     const sptr = getSurfacePtr(surface)
-    var i: i64 = 0
-    while (i < len) {
+    for i in 0..len {
         const b = @intToPtr(*u8, @ptrToInt(ptr) + i).*
         sptr.parser.feed(sptr.terminal, b)
-        i += 1
     }
 }
 
@@ -751,6 +745,99 @@ export fn cotty_terminal_bracketed_paste_mode(surface: i64) i64 {
 export fn cotty_terminal_focus_event_mode(surface: i64) i64 {
     if (getSurfacePtr(surface).terminal.mode_focus_events) { return 1 }
     return 0
+}
+
+/// Return 1 if reverse video mode (DECSCNM) is active, 0 otherwise.
+/// Renderer uses this to swap fg/bg for all cells.
+export fn cotty_terminal_reverse_video(surface: i64) i64 {
+    if (getSurfacePtr(surface).terminal.mode_reverse_video) { return 1 }
+    return 0
+}
+
+/// Return 1 if cursor blinking is enabled (mode 12), 0 otherwise.
+export fn cotty_terminal_cursor_blinking(surface: i64) i64 {
+    if (getSurfacePtr(surface).terminal.mode_cursor_blinking) { return 1 }
+    return 0
+}
+
+/// Return 1 if application keypad mode is active, 0 otherwise.
+export fn cotty_terminal_app_keypad(surface: i64) i64 {
+    if (getSurfacePtr(surface).terminal.mode_app_keypad) { return 1 }
+    return 0
+}
+
+/// Send a focus gained/lost event to the terminal.
+/// focused: 1 = gained, 0 = lost.
+export fn cotty_terminal_focus(surface: i64, focused: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.terminal.sendFocusEvent(focused == 1)
+}
+
+/// Paste text into the terminal with bracketed paste wrapping.
+/// Wraps with ESC[200~ / ESC[201~ when mode 2004 is active.
+export fn cotty_terminal_paste(surface: i64, ptr: i64, len: i64) void {
+    const sptr = getSurfacePtr(surface)
+    const fd = sptr.shell.master_fd
+    if (fd < 0) { return }
+
+    if (sptr.terminal.mode_bracketed_paste) {
+        writeStr(fd, "\x1b[200~")
+    }
+    fd_write(fd, ptr, len)
+    if (sptr.terminal.mode_bracketed_paste) {
+        writeStr(fd, "\x1b[201~")
+    }
+}
+
+// ============================================================================
+// Word/line selection
+// ============================================================================
+
+/// Select the word at (row, col). Called on double-click.
+export fn cotty_terminal_select_word(surface: i64, row: i64, col: i64) void {
+    getSurfacePtr(surface).terminal.selectWord(row, col)
+}
+
+/// Select the entire line at row. Called on triple-click.
+export fn cotty_terminal_select_line(surface: i64, row: i64) void {
+    getSurfacePtr(surface).terminal.selectLine(row)
+}
+
+// ============================================================================
+// Clipboard (OSC 52)
+// ============================================================================
+
+const ACTION_CLIPBOARD_SET: i64 = 5
+
+/// Return and clear the clipboard request type: 0=none, 1=set, 2=query.
+export fn cotty_terminal_clipboard_request(surface: i64) i64 {
+    const sptr = getSurfacePtr(surface)
+    const req = sptr.terminal.clipboard_request
+    sptr.terminal.clipboard_request = 0
+    return req
+}
+
+/// Return pointer to the decoded clipboard data buffer.
+export fn cotty_terminal_clipboard_data(surface: i64) i64 {
+    return getSurfacePtr(surface).terminal.clipboard_buf
+}
+
+/// Return length of the decoded clipboard data.
+export fn cotty_terminal_clipboard_data_len(surface: i64) i64 {
+    return getSurfacePtr(surface).terminal.clipboard_len
+}
+
+/// Send clipboard contents back to the terminal as an OSC 52 response.
+/// Called by Swift after a clipboard query (request type 2).
+export fn cotty_terminal_clipboard_response(surface: i64, ptr: i64, len: i64) void {
+    const sptr = getSurfacePtr(surface)
+    const fd = sptr.shell.master_fd
+    if (fd < 0) { return }
+    // Send OSC 52 response: ESC ] 52 ; c ; <base64> ESC \.
+    // For simplicity, send raw data — Swift should base64-encode before calling.
+    writeStr(fd, "\x1b]52;c;")
+    fd_write(fd, ptr, len)
+    writeStr(fd, "\x1b\\")
 }
 
 // ============================================================================

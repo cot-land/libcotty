@@ -246,10 +246,8 @@ struct Inspector {
         // Trim to max
         while (self.key_events.count > MAX_KEY_EVENTS) {
             var new_events: List(KeyRecord) = .{}
-            var i: i64 = 1
-            while (i < self.key_events.count) {
+            for i in 1..self.key_events.count {
                 new_events.append(self.key_events.get(i))
-                i += 1
             }
             self.key_events = new_events
         }
@@ -270,10 +268,8 @@ struct Inspector {
         // Trim to max
         while (self.vt_events.count > MAX_VT_EVENTS) {
             var new_events: List(VtRecord) = .{}
-            var i: i64 = 1
-            while (i < self.vt_events.count) {
+            for i in 1..self.vt_events.count {
                 new_events.append(self.vt_events.get(i))
-                i += 1
             }
             self.vt_events = new_events
         }
@@ -438,8 +434,12 @@ struct Inspector {
         if (terminal.dim) { sb7.append("dim ") }
         if (terminal.italic) { sb7.append("italic ") }
         if (terminal.underline) { sb7.append("underline ") }
+        if (terminal.double_underline) { sb7.append("double-underline ") }
         if (terminal.inverse) { sb7.append("inverse ") }
         if (terminal.strikethrough) { sb7.append("strikethrough ") }
+        if (terminal.blink) { sb7.append("blink ") }
+        if (terminal.hidden) { sb7.append("hidden ") }
+        if (terminal.overline) { sb7.append("overline ") }
         if (@lenOf(sb7.toString()) == 0) { sb7.append("(none)") }
         self.writeStr(row, label_col + 2, sb7.toString(), 200, 200, 200)
         row += 2
@@ -560,13 +560,11 @@ struct Inspector {
 
             // Alternate row background
             if (i % 2 == 1) {
-                var ac: i64 = 0
-                while (ac < self.cols) {
+                for ac in 0..self.cols {
                     const cell = self.grid.getCell(display_row, ac)
                     cell.bg_r = 35
                     cell.bg_g = 35
                     cell.bg_b = 42
-                    ac += 1
                 }
             }
 
@@ -616,13 +614,11 @@ struct Inspector {
 
             // Alternate row background
             if (i % 2 == 1) {
-                var ac: i64 = 0
-                while (ac < self.cols) {
+                for ac in 0..self.cols {
                     const cell = self.grid.getCell(display_row, ac)
                     cell.bg_r = 35
                     cell.bg_g = 35
                     cell.bg_b = 42
-                    ac += 1
                 }
             }
 
@@ -706,29 +702,27 @@ struct Inspector {
 
     fn writeStr(row: i64, col: i64, s: string, r: i64, g: i64, b: i64) i64 {
         if (row < 0 or row >= self.rows) { return col }
-        var i: i64 = 0
-        while (i < @lenOf(s) and col + i < self.cols) {
+        for i in 0..@lenOf(s) {
+            if (col + i >= self.cols) { return col + i }
             const c = self.grid.getCell(row, col + i)
             c.codepoint = @intToPtr(*u8, @ptrOf(s) + i).*
             c.fg_r = r
             c.fg_g = g
             c.fg_b = b
-            i += 1
         }
-        return col + i
+        return col + @lenOf(s)
     }
 
     fn writeColorSwatch(row: i64, col: i64, r: i64, g: i64, b: i64) void {
         if (row < 0 or row >= self.rows or col >= self.cols) { return }
         // Write two block chars with the actual color
-        var i: i64 = 0
-        while (i < 2 and col + i < self.cols) {
+        for i in 0..2 {
+            if (col + i >= self.cols) { break }
             const c = self.grid.getCell(row, col + i)
             c.codepoint = 0x2588  // █ full block
             c.fg_r = r
             c.fg_g = g
             c.fg_b = b
-            i += 1
         }
     }
 }
@@ -837,8 +831,7 @@ fn modsString(mods: i64) string {
 fn bytesHex(bytes: List(i64)) string {
     if (bytes.count == 0) { return "(none)" }
     var sb: StringBuilder = .{}
-    var i: i64 = 0
-    while (i < bytes.count) {
+    for i in 0..bytes.count {
         if (i > 0) { sb.appendByte(' ') }
         const b = bytes.get(i)
         if (b == 0x1b) {
@@ -855,7 +848,6 @@ fn bytesHex(bytes: List(i64)) string {
             if (hi < 10) { sb.appendByte('0' + hi) } else { sb.appendByte('a' + hi - 10) }
             if (lo < 10) { sb.appendByte('0' + lo) } else { sb.appendByte('a' + lo - 10) }
         }
-        i += 1
     }
     return sb.toString()
 }

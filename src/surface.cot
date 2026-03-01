@@ -42,11 +42,9 @@ fn ioReaderMain(arg: i64) void {
         const n = fd_read(fd, buf, 4096)
         if (n <= 0) { break }
         surface.terminal_mutex.lock()
-        var i: i64 = 0
-        while (i < n) {
+        for i in 0..n {
             const b = @intToPtr(*u8, buf + i).*
             surface.parser.feed(surface.terminal, b)
-            i += 1
         }
         surface.terminal_mutex.unlock()
         // Notify main thread — content doesn't matter, just a signal
