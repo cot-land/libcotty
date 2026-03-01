@@ -1,0 +1,372 @@
+/// File tree: directory listing, expand/collapse, visible row computation.
+/// All logic lives here in Cot — Swift is a thin rendering shell.
+
+import "std/list"
+import "std/sys"
+import "std/string"
+import "std/fs"
+import "std/path"
+
+/// A single entry in the file tree (file or directory).
+struct FileEntry {
+    name: string,
+    full_path: string,
+    is_dir: bool,
+    depth: i64,
+    is_expanded: bool,
+    children_loaded: bool,
+    first_child: i64,
+    child_count: i64,
+    parent_index: i64,
+}
+
+/// Comparator for sorting entries: directories first, then case-insensitive alpha.
+fn compareEntries(a: FileEntry, b: FileEntry) i64 {
+    // Directories before files
+    if (a.is_dir and !b.is_dir) { return -1 }
+    if (!a.is_dir and b.is_dir) { return 1 }
+    // Case-insensitive alphabetical
+    return compare(toLower(a.name), toLower(b.name))
+}
+
+/// File tree state. Owns the entry list and visible row cache.
+struct FileTree {
+    entries: List(FileEntry),
+    visible_rows: List(i64),
+    root_path: string,
+    selected_row: i64,
+    root_first_child: i64,
+    root_child_count: i64,
+    name_buf: List(u8),
+    path_buf: List(u8),
+
+    /// Create a new file tree rooted at root_path.
+    static fn init(root_path: string) FileTree {
+        var entries: List(FileEntry) = .{}
+        var visible_rows: List(i64) = .{}
+        var name_buf: List(u8) = .{}
+        var path_buf: List(u8) = .{}
+
+        var tree = FileTree {
+            entries: entries,
+            visible_rows: visible_rows,
+            root_path: root_path,
+            selected_row: -1,
+            root_first_child: -1,
+            root_child_count: 0,
+            name_buf: name_buf,
+            path_buf: path_buf,
+        }
+
+        tree.loadRootChildren()
+        tree.rebuildVisibleRows()
+        return tree
+    }
+
+    /// Load children of the root directory.
+    fn loadRootChildren() void {
+        var names: List(string) = .{}
+        listDir(self.root_path, &names) catch { return }
+
+        self.root_first_child = self.entries.count
+        self.root_child_count = 0
+
+        // Build entries from names
+        var tmp: List(FileEntry) = .{}
+        for i in 0..names.count {
+            const name = names.get(i)
+            // Skip hidden files (starting with '.')
+            if (@lenOf(name) > 0 and charAt(name, 0) == '.') { continue }
+            const full = join(self.root_path, name)
+            const entry = FileEntry {
+                name: name,
+                full_path: full,
+                is_dir: isDir(full),
+                depth: 0,
+                is_expanded: false,
+                children_loaded: false,
+                first_child: -1,
+                child_count: 0,
+                parent_index: -1,
+            }
+            tmp.append(entry)
+        }
+
+        // Sort: dirs first, then case-insensitive alpha
+        tmp.sort(compareEntries)
+
+        // Append sorted entries
+        for i in 0..tmp.count {
+            self.entries.append(tmp.get(i))
+        }
+        self.root_child_count = tmp.count
+        tmp.free()
+        names.free()
+    }
+
+    /// Lazy-load children for a directory entry at the given index.
+    fn loadChildren(parent_idx: i64) void {
+        if (parent_idx < 0 or parent_idx >= self.entries.count) { return }
+        var parent = @intToPtr(*FileEntry, self.entries.items + parent_idx * @sizeOf(FileEntry))
+        if (parent.children_loaded) { return }
+        if (!parent.is_dir) { return }
+
+        // Snapshot parent fields before any list mutations that could invalidate the pointer
+        const parent_full_path = parent.full_path
+        const parent_depth = parent.depth
+
+        var names: List(string) = .{}
+        listDir(parent_full_path, &names) catch {
+            parent.children_loaded = true
+            return
+        }
+
+        // Record where children will start (valid — no appends yet)
+        parent.first_child = self.entries.count
+
+        // Build entries from names
+        var tmp: List(FileEntry) = .{}
+        for i in 0..names.count {
+            const name = names.get(i)
+            // Skip hidden files
+            if (@lenOf(name) > 0 and charAt(name, 0) == '.') { continue }
+            const full = join(parent_full_path, name)
+            const entry = FileEntry {
+                name: name,
+                full_path: full,
+                is_dir: isDir(full),
+                depth: parent_depth + 1,
+                is_expanded: false,
+                children_loaded: false,
+                first_child: -1,
+                child_count: 0,
+                parent_index: parent_idx,
+            }
+            tmp.append(entry)
+        }
+
+        // Sort: dirs first, then case-insensitive alpha
+        tmp.sort(compareEntries)
+
+        // Append sorted entries — this may reallocate self.entries, invalidating parent pointer
+        for i in 0..tmp.count {
+            self.entries.append(tmp.get(i))
+        }
+
+        // Re-fetch parent pointer after appends (backing buffer may have moved)
+        parent = @intToPtr(*FileEntry, self.entries.items + parent_idx * @sizeOf(FileEntry))
+        parent.child_count = tmp.count
+        parent.children_loaded = true
+        tmp.free()
+        names.free()
+    }
+
+    /// Toggle expand/collapse for the directory at the given visible row.
+    fn toggleExpand(row: i64) void {
+        if (row < 0 or row >= self.visible_rows.count) { return }
+        const entry_idx = self.visible_rows.get(row)
+        var entry = @intToPtr(*FileEntry, self.entries.items + entry_idx * @sizeOf(FileEntry))
+        if (!entry.is_dir) { return }
+
+        if (entry.is_expanded) {
+            entry.is_expanded = false
+        } else {
+            // Lazy-load children if needed
+            if (!entry.children_loaded) {
+                self.loadChildren(entry_idx)
+                // Re-fetch pointer in case entries list reallocated
+                entry = @intToPtr(*FileEntry, self.entries.items + entry_idx * @sizeOf(FileEntry))
+            }
+            entry.is_expanded = true
+        }
+        self.rebuildVisibleRows()
+    }
+
+    /// Rebuild the flat visible_rows list by DFS walking expanded nodes.
+    fn rebuildVisibleRows() void {
+        self.visible_rows.count = 0
+        if (self.root_child_count == 0) { return }
+        self.walkChildren(self.root_first_child, self.root_child_count)
+    }
+
+    /// Recursive helper: walk children starting at first_idx for count entries.
+    fn walkChildren(first: i64, count: i64) void {
+        for i in 0..count {
+            const idx = first + i
+            self.visible_rows.append(idx)
+            const entry = self.entries.get(idx)
+            if (entry.is_dir and entry.is_expanded and entry.child_count > 0) {
+                self.walkChildren(entry.first_child, entry.child_count)
+            }
+        }
+    }
+
+    /// Select a visible row (bounds-checked).
+    fn selectRow(row: i64) void {
+        if (row >= 0 and row < self.visible_rows.count) {
+            self.selected_row = row
+        }
+    }
+
+    /// Return the number of visible rows.
+    fn rowCount() i64 {
+        return self.visible_rows.count
+    }
+
+    /// Copy the name of the entry at visible row into name_buf. Returns the length.
+    fn rowName(row: i64) i64 {
+        if (row < 0 or row >= self.visible_rows.count) { return 0 }
+        const entry = self.entries.get(self.visible_rows.get(row))
+        const name = entry.name
+        const len = @lenOf(name)
+        const ptr = @ptrOf(name)
+        self.name_buf.count = 0
+        for i in 0..len {
+            self.name_buf.append(@intToPtr(*u8, ptr + i).*)
+        }
+        return len
+    }
+
+    /// Return the depth of the entry at visible row.
+    fn rowDepth(row: i64) i64 {
+        if (row < 0 or row >= self.visible_rows.count) { return 0 }
+        return self.entries.get(self.visible_rows.get(row)).depth
+    }
+
+    /// Return 1 if the entry at visible row is a directory, 0 otherwise.
+    fn rowIsDir(row: i64) i64 {
+        if (row < 0 or row >= self.visible_rows.count) { return 0 }
+        if (self.entries.get(self.visible_rows.get(row)).is_dir) { return 1 }
+        return 0
+    }
+
+    /// Return 1 if the entry at visible row is expanded, 0 otherwise.
+    fn rowIsExpanded(row: i64) i64 {
+        if (row < 0 or row >= self.visible_rows.count) { return 0 }
+        if (self.entries.get(self.visible_rows.get(row)).is_expanded) { return 1 }
+        return 0
+    }
+
+    /// Copy the full path of the entry at visible row into path_buf. Returns the length.
+    fn rowPath(row: i64) i64 {
+        if (row < 0 or row >= self.visible_rows.count) { return 0 }
+        const entry = self.entries.get(self.visible_rows.get(row))
+        const path = entry.full_path
+        const len = @lenOf(path)
+        const ptr = @ptrOf(path)
+        self.path_buf.count = 0
+        for i in 0..len {
+            self.path_buf.append(@intToPtr(*u8, ptr + i).*)
+        }
+        return len
+    }
+
+    /// Change root path, clear all state, reload.
+    fn setRootPath(ptr: *u8, len: i64) void {
+        self.entries.count = 0
+        self.visible_rows.count = 0
+        self.selected_row = -1
+        self.root_first_child = -1
+        self.root_child_count = 0
+        self.root_path = @string(@ptrToInt(ptr), len)
+        self.loadRootChildren()
+        self.rebuildVisibleRows()
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "file tree init with tmp dir" {
+    // Create a temp directory structure for testing
+    makeDirAll("/tmp/cotty_test_tree/adir") catch {}
+    makeDirAll("/tmp/cotty_test_tree/bdir") catch {}
+    writeFile("/tmp/cotty_test_tree/cfile.txt", "hello") catch {}
+    writeFile("/tmp/cotty_test_tree/adir/nested.txt", "nested") catch {}
+    writeFile("/tmp/cotty_test_tree/.hidden", "hidden") catch {}
+
+    var tree = FileTree.init("/tmp/cotty_test_tree")
+
+    // Should have 3 visible entries (hidden excluded)
+    @assertEq(tree.rowCount(), 3)
+
+    // Dirs first, then files — all case-insensitive sorted
+    // adir, bdir, cfile.txt
+    @assertEq(tree.rowIsDir(0), 1)
+    @assertEq(tree.rowIsDir(1), 1)
+    @assertEq(tree.rowIsDir(2), 0)
+
+    // All at depth 0
+    @assertEq(tree.rowDepth(0), 0)
+    @assertEq(tree.rowDepth(1), 0)
+    @assertEq(tree.rowDepth(2), 0)
+
+    // None expanded
+    @assertEq(tree.rowIsExpanded(0), 0)
+    @assertEq(tree.rowIsExpanded(1), 0)
+}
+
+test "file tree toggle expand" {
+    makeDirAll("/tmp/cotty_test_tree/adir") catch {}
+    writeFile("/tmp/cotty_test_tree/adir/nested.txt", "nested") catch {}
+
+    var tree = FileTree.init("/tmp/cotty_test_tree")
+    const initial_count = tree.rowCount()
+
+    // Expand first dir (adir)
+    tree.toggleExpand(0)
+    @assertEq(tree.rowIsExpanded(0), 1)
+    @assert(tree.rowCount() > initial_count)
+
+    // Nested entry should be at depth 1
+    @assertEq(tree.rowDepth(1), 1)
+
+    // Collapse
+    tree.toggleExpand(0)
+    @assertEq(tree.rowIsExpanded(0), 0)
+    @assertEq(tree.rowCount(), initial_count)
+}
+
+test "file tree select row" {
+    var tree = FileTree.init("/tmp/cotty_test_tree")
+    @assertEq(tree.selected_row, -1)
+
+    tree.selectRow(0)
+    @assertEq(tree.selected_row, 0)
+
+    tree.selectRow(1)
+    @assertEq(tree.selected_row, 1)
+
+    // Out of bounds — no change
+    tree.selectRow(999)
+    @assertEq(tree.selected_row, 1)
+
+    tree.selectRow(-1)
+    @assertEq(tree.selected_row, 1)
+}
+
+test "file tree row name" {
+    var tree = FileTree.init("/tmp/cotty_test_tree")
+    const len = tree.rowName(0)
+    @assert(len > 0)
+}
+
+test "file tree row path" {
+    var tree = FileTree.init("/tmp/cotty_test_tree")
+    const len = tree.rowPath(0)
+    @assert(len > 0)
+}
+
+test "file tree hidden files excluded" {
+    // .hidden was created in the init test — verify it's not visible
+    var tree = FileTree.init("/tmp/cotty_test_tree")
+    // Check that no visible row has a name starting with '.'
+    for i in 0..tree.rowCount() {
+        const name_len = tree.rowName(i)
+        if (name_len > 0) {
+            const first_byte = tree.name_buf.get(0)
+            @assert(first_byte != '.')
+        }
+    }
+}

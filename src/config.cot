@@ -30,6 +30,8 @@ var THEME_READY: i64 = 0
 struct Config {
     font_name: string,
     font_size: i64,
+    ui_font_name: string,
+    ui_font_size: i64,
     padding: i64,
     bg_r: i64,
     bg_g: i64,
@@ -56,6 +58,8 @@ struct Config {
         return Config {
             font_name: "JetBrains Mono",
             font_size: 18,
+            ui_font_name: "",
+            ui_font_size: 13,
             padding: 8,
             bg_r: 12, bg_g: 12, bg_b: 12,
             fg_r: 217, fg_g: 217, fg_b: 217,
@@ -89,6 +93,14 @@ struct Config {
         const size_val = jsonObjectGet(root, "font-size")
         if (size_val != 0 and jsonTag(size_val) == JSON_INT) {
             cfg.font_size = jsonGetInt(size_val)
+        }
+        const ui_font_val = jsonObjectGet(root, "ui-font-family")
+        if (ui_font_val != 0 and jsonTag(ui_font_val) == JSON_STRING) {
+            cfg.ui_font_name = jsonGetString(ui_font_val)
+        }
+        const ui_size_val = jsonObjectGet(root, "ui-font-size")
+        if (ui_size_val != 0 and jsonTag(ui_size_val) == JSON_INT) {
+            cfg.ui_font_size = jsonGetInt(ui_size_val)
         }
         const pad_val = jsonObjectGet(root, "padding")
         if (pad_val != 0 and jsonTag(pad_val) == JSON_INT) {

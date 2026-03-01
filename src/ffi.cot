@@ -16,6 +16,7 @@ import "pty"
 import "config"
 import "inspector"
 import "workspace"
+import "file_tree"
 
 // ============================================================================
 // Globals
@@ -596,6 +597,21 @@ export fn cotty_config_font_size() i64 {
     return g_app.config.font_size
 }
 
+/// Return a pointer to the UI font name string bytes (empty = system font).
+export fn cotty_config_ui_font_name() i64 {
+    return @ptrOf(g_app.config.ui_font_name)
+}
+
+/// Return the byte length of the UI font name string.
+export fn cotty_config_ui_font_name_len() i64 {
+    return @lenOf(g_app.config.ui_font_name)
+}
+
+/// Return the configured UI font size.
+export fn cotty_config_ui_font_size() i64 {
+    return g_app.config.ui_font_size
+}
+
 /// Return the configured padding in points.
 export fn cotty_config_padding() i64 {
     return g_app.config.padding
@@ -1148,5 +1164,98 @@ export fn cotty_workspace_root_url_len(ws: i64) i64 {
 /// Set the root URL from raw bytes.
 export fn cotty_workspace_set_root_url(ws: i64, ptr: *u8, len: i64) void {
     getWorkspacePtr(ws).setRootUrl(ptr, len)
+}
+
+// ============================================================================
+// File Tree
+// ============================================================================
+
+/// Cast an opaque file tree handle to a *FileTree pointer.
+fn getFileTreePtr(handle: i64) *FileTree {
+    return @intToPtr(*FileTree, handle)
+}
+
+/// Create a new file tree rooted at the given path. Returns opaque handle.
+export fn cotty_filetree_new(root_ptr: *u8, root_len: i64) i64 {
+    const root = @string(@ptrToInt(root_ptr), root_len)
+    var tree = FileTree.init(root)
+    const ptr = alloc(0, @sizeOf(FileTree))
+    const dst = @intToPtr(*FileTree, ptr)
+    dst.* = tree
+    return ptr
+}
+
+/// Free a file tree.
+export fn cotty_filetree_free(tree: i64) void {
+    const tptr = getFileTreePtr(tree)
+    tptr.entries.free()
+    tptr.visible_rows.free()
+    tptr.name_buf.free()
+    tptr.path_buf.free()
+    dealloc(tree)
+}
+
+/// Set a new root path and reload.
+export fn cotty_filetree_set_root(tree: i64, ptr: *u8, len: i64) void {
+    getFileTreePtr(tree).setRootPath(ptr, len)
+}
+
+/// Return the number of visible rows.
+export fn cotty_filetree_row_count(tree: i64) i64 {
+    return getFileTreePtr(tree).rowCount()
+}
+
+/// Toggle expand/collapse for a directory at the given visible row.
+export fn cotty_filetree_toggle_expand(tree: i64, row: i64) void {
+    getFileTreePtr(tree).toggleExpand(row)
+}
+
+/// Select a visible row.
+export fn cotty_filetree_select_row(tree: i64, row: i64) void {
+    getFileTreePtr(tree).selectRow(row)
+}
+
+/// Return the selected row index (-1 if none).
+export fn cotty_filetree_selected_row(tree: i64) i64 {
+    return getFileTreePtr(tree).selected_row
+}
+
+/// Copy the name of the entry at visible row into name_buf, return pointer.
+export fn cotty_filetree_row_name(tree: i64, row: i64) i64 {
+    const tptr = getFileTreePtr(tree)
+    tptr.rowName(row)
+    return tptr.name_buf.items
+}
+
+/// Return the byte length of the name at visible row.
+export fn cotty_filetree_row_name_len(tree: i64, row: i64) i64 {
+    return getFileTreePtr(tree).rowName(row)
+}
+
+/// Return the depth of the entry at visible row.
+export fn cotty_filetree_row_depth(tree: i64, row: i64) i64 {
+    return getFileTreePtr(tree).rowDepth(row)
+}
+
+/// Return 1 if the entry at visible row is a directory, 0 otherwise.
+export fn cotty_filetree_row_is_dir(tree: i64, row: i64) i64 {
+    return getFileTreePtr(tree).rowIsDir(row)
+}
+
+/// Return 1 if the entry at visible row is expanded, 0 otherwise.
+export fn cotty_filetree_row_is_expanded(tree: i64, row: i64) i64 {
+    return getFileTreePtr(tree).rowIsExpanded(row)
+}
+
+/// Copy the full path of the entry at visible row into path_buf, return pointer.
+export fn cotty_filetree_row_path(tree: i64, row: i64) i64 {
+    const tptr = getFileTreePtr(tree)
+    tptr.rowPath(row)
+    return tptr.path_buf.items
+}
+
+/// Return the byte length of the full path at visible row.
+export fn cotty_filetree_row_path_len(tree: i64, row: i64) i64 {
+    return getFileTreePtr(tree).rowPath(row)
 }
 
