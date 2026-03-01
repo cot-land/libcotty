@@ -1,0 +1,79 @@
+import "std/sys"
+
+struct Pair {
+    a: i64,
+    b: i64,
+}
+
+fn returnPairPtr(data: i64) *Pair {
+    return @intToPtr(*Pair, data)
+}
+
+fn returnI64(data: i64) i64 {
+    return data
+}
+
+// Test 1: call fn but don't use result
+test "call no use" {
+    const data = alloc(0, 16)
+    @intToPtr(*i64, data).* = 42
+    var i: i64 = 0
+    while (i < 2) {
+        returnPairPtr(data)
+        i += 1
+    }
+    @assertEq(@intToPtr(*i64, data).*, 42)
+}
+
+// Test 2: call fn, store result to var of type i64 (not *Pair)
+test "call store as i64" {
+    const data = alloc(0, 16)
+    @intToPtr(*i64, data).* = 42
+    var i: i64 = 0
+    while (i < 2) {
+        const addr: i64 = @ptrToInt(returnPairPtr(data))
+        if (addr == 0) { @assert(false) }
+        i += 1
+    }
+    @assertEq(@intToPtr(*i64, data).*, 42)
+}
+
+// Test 3: call fn returning i64 (same ABI, different type)
+test "call i64 fn" {
+    const data = alloc(0, 16)
+    @intToPtr(*i64, data).* = 42
+    var i: i64 = 0
+    while (i < 2) {
+        const val = returnI64(data)
+        if (val == 0) { @assert(false) }
+        i += 1
+    }
+    @assertEq(@intToPtr(*i64, data).*, 42)
+}
+
+// Test 4: store fn result to const p: *Pair (the failing case)
+test "call store *Pair" {
+    const data = alloc(0, 16)
+    @intToPtr(*i64, data).* = 42
+    var i: i64 = 0
+    while (i < 2) {
+        const p = returnPairPtr(data)
+        if (@ptrToInt(p) == 0) { @assert(false) }
+        i += 1
+    }
+    @assertEq(@intToPtr(*i64, data).*, 42)
+}
+
+// Test 5: store fn result to const addr: i64, then cast
+test "call store i64 then cast" {
+    const data = alloc(0, 16)
+    @intToPtr(*i64, data).* = 42
+    var i: i64 = 0
+    while (i < 2) {
+        const addr = @ptrToInt(returnPairPtr(data))
+        const p = @intToPtr(*Pair, addr)
+        if (@ptrToInt(p) == 0) { @assert(false) }
+        i += 1
+    }
+    @assertEq(@intToPtr(*i64, data).*, 42)
+}
