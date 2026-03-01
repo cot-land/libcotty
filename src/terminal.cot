@@ -14,11 +14,18 @@ import "input"
 /// Flat grid of cells addressed by (row, col).
 /// Cells are stored contiguously in row-major order.
 /// row_wrap tracks soft-wrap state per row for resize reflow.
+// Semantic prompt markers for OSC 133
+const SEMANTIC_NONE: i64 = 0
+const SEMANTIC_PROMPT: i64 = 1
+const SEMANTIC_INPUT: i64 = 2
+const SEMANTIC_OUTPUT: i64 = 3
+
 struct TerminalGrid {
     cells: List(Cell),
     rows: i64,
     cols: i64,
     row_wrap: List(i64),
+    row_semantic: List(i64),
     active_start: i64,
     max_scrollback: i64,
     scrollback_enabled: i64,
@@ -33,8 +40,10 @@ struct TerminalGrid {
         }
 
         var wraps: List(i64) = .{}
+        var semantics: List(i64) = .{}
         for w in 0..rows {
             wraps.append(0)
+            semantics.append(0)
         }
 
         return TerminalGrid {
@@ -42,6 +51,7 @@ struct TerminalGrid {
             rows: rows,
             cols: cols,
             row_wrap: wraps,
+            row_semantic: semantics,
             active_start: 0,
             max_scrollback: 10000,
             scrollback_enabled: 1,
@@ -64,6 +74,16 @@ struct TerminalGrid {
         @intToPtr(*i64, self.row_wrap.items + (self.active_start + row) * @sizeOf(i64)).* = val
     }
 
+    /// Get the semantic marker for a row.
+    fn getRowSemantic(row: i64) i64 {
+        return @intToPtr(*i64, self.row_semantic.items + (self.active_start + row) * @sizeOf(i64)).*
+    }
+
+    /// Set the semantic marker for a row.
+    fn setRowSemantic(row: i64, val: i64) void {
+        @intToPtr(*i64, self.row_semantic.items + (self.active_start + row) * @sizeOf(i64)).* = val
+    }
+
     /// Clear the entire grid to default blank cells.
     fn clear() void {
         for row in 0..self.rows {
@@ -77,6 +97,7 @@ struct TerminalGrid {
             self.getCell(row, col).* = Cell.init()
         }
         self.setRowWrap(row, 0)
+        self.setRowSemantic(row, 0)
     }
 
     /// Scroll the region [top..bottom] up by one line.
@@ -91,8 +112,9 @@ struct TerminalGrid {
                     for i in 0..self.cols {
                         self.cells.append(Cell.init())
                     }
-                    // Append a wrap flag for the new row
+                    // Append wrap and semantic flags for the new row
                     self.row_wrap.append(0)
+                    self.row_semantic.append(0)
                     // Advance active_start — old top row is now scrollback
                     self.active_start += 1
                     self.trimScrollback()
@@ -107,6 +129,7 @@ struct TerminalGrid {
             const src = self.cells.items + ((self.active_start + row + 1) * self.cols) * @sizeOf(Cell)
             memcpy(dst, src, self.cols * @sizeOf(Cell))
             self.setRowWrap(row, self.getRowWrap(row + 1))
+            self.setRowSemantic(row, self.getRowSemantic(row + 1))
             row += 1
         }
         self.clearLine(bottom)
@@ -121,6 +144,7 @@ struct TerminalGrid {
             const src = self.cells.items + ((self.active_start + row - 1) * self.cols) * @sizeOf(Cell)
             memcpy(dst, src, self.cols * @sizeOf(Cell))
             self.setRowWrap(row, self.getRowWrap(row - 1))
+            self.setRowSemantic(row, self.getRowSemantic(row - 1))
             row -= 1
         }
         self.clearLine(top)
@@ -159,6 +183,9 @@ struct TerminalGrid {
         const keep_wraps = total_wraps - trim
         memcpy(self.row_wrap.items, self.row_wrap.items + trim * @sizeOf(i64), keep_wraps * @sizeOf(i64))
         self.row_wrap.count = keep_wraps
+        // memmove row_semantic forward
+        memcpy(self.row_semantic.items, self.row_semantic.items + trim * @sizeOf(i64), keep_wraps * @sizeOf(i64))
+        self.row_semantic.count = keep_wraps
         self.active_start = self.max_scrollback
     }
 }
@@ -204,6 +231,13 @@ fn decSpecialMap(cp: i64) i64 {
         0x7E => 0x00B7,  // ·
         else => cp,
     }
+}
+
+/// Map a codepoint using the UK charset (ESC ( A).
+/// Only 0x23 (#) maps to 0x00A3 (£ pound sign); everything else is identity.
+fn ukCharsetMap(cp: i64) i64 {
+    if (cp == 0x23) { return 0x00A3 }
+    return cp
 }
 
 // ============================================================================
@@ -397,6 +431,8 @@ struct TerminalState {
     single_shift: i64,
     charset_g0: i64,
     charset_g1: i64,
+    charset_g2: i64,
+    charset_g3: i64,
     active_charset: i64,
     tabstops: List(i64),
     cursor_shape: i64,
@@ -405,6 +441,8 @@ struct TerminalState {
     title_len: i64,
     title_stack_buf: i64,
     title_stack_len: i64,
+    pwd_buf: i64,
+    pwd_len: i64,
     clipboard_buf: i64,
     clipboard_len: i64,
     clipboard_request: i64,
@@ -425,6 +463,13 @@ struct TerminalState {
     kitty_kbd_flags_6: i64,
     kitty_kbd_flags_7: i64,
     kitty_kbd_idx: i64,
+    ul_r: i64,
+    ul_g: i64,
+    ul_b: i64,
+    mode_backspace_sends_bs: bool,
+    mode_left_right_margin: bool,
+    mode_sixel_scrolling: bool,
+    mode_grapheme_cluster: bool,
 
     /// Create a terminal with the given dimensions and default state.
     static fn init(rows: i64, cols: i64) TerminalState {
@@ -487,6 +532,8 @@ struct TerminalState {
             single_shift: 0,
             charset_g0: 0,
             charset_g1: 0,
+            charset_g2: 0,
+            charset_g3: 0,
             active_charset: 0,
             tabstops: initTabstops(cols),
             cursor_shape: 0,
@@ -495,6 +542,8 @@ struct TerminalState {
             title_len: 0,
             title_stack_buf: 0,
             title_stack_len: 0,
+            pwd_buf: 0,
+            pwd_len: 0,
             clipboard_buf: 0,
             clipboard_len: 0,
             clipboard_request: 0,
@@ -515,6 +564,13 @@ struct TerminalState {
             kitty_kbd_flags_6: 0,
             kitty_kbd_flags_7: 0,
             kitty_kbd_idx: 0,
+            ul_r: -1,
+            ul_g: -1,
+            ul_b: -1,
+            mode_backspace_sends_bs: false,
+            mode_left_right_margin: false,
+            mode_sixel_scrolling: false,
+            mode_grapheme_cluster: false,
         }
     }
 
@@ -524,20 +580,26 @@ struct TerminalState {
     /// Wrapping is deferred: reaching the last column sets pending_wrap,
     /// and the actual wrap (CR + LF) happens on the next printable character.
     fn putChar(cp: i64) void {
-        // Apply DEC Special Graphics charset mapping
+        // Apply charset mapping (DEC Special Graphics, UK, etc.)
         var mapped = cp
         var charset: i64 = self.charset_g0
         if (self.single_shift == 2) {
-            charset = 0  // G2 (ASCII by default)
+            charset = self.charset_g2
             self.single_shift = 0
         } else if (self.single_shift == 3) {
-            charset = 0  // G3 (ASCII by default)
+            charset = self.charset_g3
             self.single_shift = 0
         } else if (self.active_charset == 1) {
             charset = self.charset_g1
+        } else if (self.active_charset == 2) {
+            charset = self.charset_g2
+        } else if (self.active_charset == 3) {
+            charset = self.charset_g3
         }
         if (charset == 1 and mapped >= 0x60 and mapped <= 0x7E) {
             mapped = decSpecialMap(mapped)
+        } else if (charset == 2) {
+            mapped = ukCharsetMap(mapped)
         }
 
         if (self.pending_wrap) {
@@ -582,6 +644,10 @@ struct TerminalState {
         if (self.hidden) { c.flags = c.flags | CELL_HIDDEN }
         if (self.overline) { c.flags = c.flags | CELL_OVERLINE }
         if (self.double_underline) { c.flags = c.flags | CELL_DOUBLE_UNDERLINE }
+        c.ul_r = self.ul_r
+        c.ul_g = self.ul_g
+        c.ul_b = self.ul_b
+        if (self.ul_r >= 0) { c.flags = c.flags | CELL_CUSTOM_UL_COLOR }
 
         self.previous_char = mapped
 
@@ -835,6 +901,48 @@ struct TerminalState {
         }
     }
 
+    /// Back Index (DECBI): if cursor at col 0, shift scroll region right
+    /// and blank col 0; otherwise move cursor left.
+    fn backIndex() void {
+        self.pending_wrap = false
+        if (self.cursor_col == 0) {
+            // Shift all cells in each row of the scroll region right by one
+            var row = self.scroll_top
+            while (row <= self.scroll_bottom) {
+                var col = self.grid.cols - 1
+                while (col > 0) {
+                    self.grid.getCell(row, col).* = self.grid.getCell(row, col - 1).*
+                    col -= 1
+                }
+                self.grid.getCell(row, 0).* = Cell.init()
+                row += 1
+            }
+        } else {
+            self.cursor_col -= 1
+        }
+    }
+
+    /// Forward Index (DECFI): if cursor at right margin, shift scroll region left
+    /// and blank last col; otherwise move cursor right.
+    fn forwardIndex() void {
+        self.pending_wrap = false
+        if (self.cursor_col >= self.grid.cols - 1) {
+            // Shift all cells in each row of the scroll region left by one
+            var row = self.scroll_top
+            while (row <= self.scroll_bottom) {
+                var col: i64 = 0
+                while (col < self.grid.cols - 1) {
+                    self.grid.getCell(row, col).* = self.grid.getCell(row, col + 1).*
+                    col += 1
+                }
+                self.grid.getCell(row, self.grid.cols - 1).* = Cell.init()
+                row += 1
+            }
+        } else {
+            self.cursor_col += 1
+        }
+    }
+
     // -- Insert / delete (CSI @, CSI P) -------------------------------------
 
     /// Insert count blank cells at cursor, shifting existing cells right (CSI @).
@@ -925,6 +1033,9 @@ struct TerminalState {
         self.hidden = false
         self.overline = false
         self.double_underline = false
+        self.ul_r = -1
+        self.ul_g = -1
+        self.ul_b = -1
     }
 
     // -- Bell ---------------------------------------------------------------
@@ -949,9 +1060,24 @@ struct TerminalState {
         }
     }
 
-    /// Set the working directory from OSC 7 data (stored for future use).
+    /// Set the icon/tab title (OSC 1). Stored separately from window title.
+    fn setIconTitle(buf: List(i64), start: i64, len: i64) void {
+        // Icon title is stored but not used for the window titlebar.
+        // Modern terminals treat this as a tab-specific label.
+    }
+
+    /// Set the working directory from OSC 7 data.
+    /// OSC 7 payload is typically "file://hostname/path" — we store the full URI
+    /// so the Swift side can use it directly with URL(string:).
     fn setPwd(buf: List(i64), start: i64, len: i64) void {
-        // Stored for future use (e.g., new tab in same directory)
+        if (len <= 0) { return }
+        if (self.pwd_buf == 0 or len > self.pwd_len) {
+            self.pwd_buf = alloc(self.pwd_buf, len)
+        }
+        self.pwd_len = len
+        for i in 0..len {
+            @intToPtr(*u8, self.pwd_buf + i).* = @intCast(u8, buf.get(start + i))
+        }
     }
 
     // -- Soft Reset (DECSTR) ------------------------------------------------
@@ -979,9 +1105,15 @@ struct TerminalState {
         self.scroll_bottom = self.grid.rows - 1
         self.charset_g0 = 0
         self.charset_g1 = 0
+        self.charset_g2 = 0
+        self.charset_g3 = 0
         self.active_charset = 0
         self.cursor_shape = 0
         self.pending_wrap = false
+        self.mode_backspace_sends_bs = false
+        self.mode_left_right_margin = false
+        self.mode_sixel_scrolling = false
+        self.mode_grapheme_cluster = false
         self.kittyKeyboardReset()
     }
 
@@ -1137,6 +1269,18 @@ struct TerminalState {
             5 => { self.mode_reverse_video = enable },
             12 => { self.mode_cursor_blinking = enable },
             45 => { self.mode_reverse_wrap = enable },
+            3 => {
+                // DECCOLM — 132/80 Column Mode (stub: clear + reset)
+                self.eraseInDisplay(2)
+                self.setCursorPos(0, 0)
+                self.scroll_top = 0
+                self.scroll_bottom = self.grid.rows - 1
+            },
+            66 => { self.mode_app_keypad = enable },
+            67 => { self.mode_backspace_sends_bs = enable },
+            69 => { self.mode_left_right_margin = enable },
+            80 => { self.mode_sixel_scrolling = enable },
+            2027 => { self.mode_grapheme_cluster = enable },
             else => {},
         }
     }
@@ -1169,6 +1313,12 @@ struct TerminalState {
             1049 => { if (self.mode_alt_screen) { return 1 } else { return 2 } },
             2004 => { if (self.mode_bracketed_paste) { return 1 } else { return 2 } },
             2026 => { if (self.mode_sync_output) { return 1 } else { return 2 } },
+            3 => 2,  // DECCOLM — always report as reset (80-col)
+            66 => { if (self.mode_app_keypad) { return 1 } else { return 2 } },
+            67 => { if (self.mode_backspace_sends_bs) { return 1 } else { return 2 } },
+            69 => { if (self.mode_left_right_margin) { return 1 } else { return 2 } },
+            80 => { if (self.mode_sixel_scrolling) { return 1 } else { return 2 } },
+            2027 => { if (self.mode_grapheme_cluster) { return 1 } else { return 2 } },
             else => 0,
         }
     }
@@ -1263,6 +1413,12 @@ struct TerminalState {
     fn sendAnswerback() void {
         if (self.pty_fd < 0) { return }
         // Empty answerback (same as Ghostty default)
+    }
+
+    /// Send XTVERSION response: DCS >| cotty 0.1 ST
+    fn sendXtversion() void {
+        if (self.pty_fd < 0) { return }
+        writeStr(self.pty_fd, "\x1bP>|cotty 0.1\x1b\\")
     }
 
     /// Send terminal size report in cells: ESC [ 8 ; rows ; cols t
@@ -1365,6 +1521,7 @@ struct TerminalState {
             const src = self.grid.cells.items + ((self.grid.active_start + row) * self.grid.cols) * @sizeOf(Cell)
             memcpy(dst, src, self.grid.cols * @sizeOf(Cell))
             new_grid.setRowWrap(row, self.grid.getRowWrap(row))
+            new_grid.setRowSemantic(row, self.grid.getRowSemantic(row))
             row += 1
         }
 
@@ -1410,6 +1567,7 @@ struct TerminalState {
         var out_cells: List(Cell) = .{}
 
         var out_wraps: List(i64) = .{}
+        var out_semantics: List(i64) = .{}
 
         var out_rows: i64 = 0
         var new_cursor_row: i64 = 0
@@ -1478,6 +1636,8 @@ struct TerminalState {
                 } else {
                     out_wraps.append(0)
                 }
+                // Semantic from first row of logical line propagates
+                out_semantics.append(self.grid.getRowSemantic(line_start))
 
                 out_rows += 1
                 row_idx += 1
@@ -1522,6 +1682,7 @@ struct TerminalState {
                 col += 1
             }
             new_grid.setRowWrap(dst_row, @intToPtr(*i64, out_wraps.items + src_idx * @sizeOf(i64)).*)
+            new_grid.setRowSemantic(dst_row, @intToPtr(*i64, out_semantics.items + src_idx * @sizeOf(i64)).*)
             dst_row += 1
             src_idx += 1
         }
@@ -1788,6 +1949,61 @@ struct TerminalState {
     /// Return true if viewport is at bottom (following active output).
     fn viewportIsBottom() bool {
         return self.viewport_row < 0
+    }
+
+    // -- Semantic prompts (OSC 133) -----------------------------------------
+
+    /// Handle OSC 133 semantic prompt markers.
+    /// 'A' = prompt start, 'B' = input start, 'C' = output start, 'D' = command end.
+    fn handleSemanticPrompt(marker: i64) void {
+        if (marker == 'A') {
+            // Prompt start — if cursor not at col 0, do CR+LF first
+            if (self.cursor_col > 0) {
+                self.carriageReturn()
+                self.newline()
+            }
+            self.grid.setRowSemantic(self.cursor_row, SEMANTIC_PROMPT)
+        } else if (marker == 'B') {
+            self.grid.setRowSemantic(self.cursor_row, SEMANTIC_INPUT)
+        } else if (marker == 'C') {
+            self.grid.setRowSemantic(self.cursor_row, SEMANTIC_OUTPUT)
+        } else if (marker == 'D') {
+            self.grid.setRowSemantic(self.cursor_row, SEMANTIC_OUTPUT)
+        }
+    }
+
+    /// Jump to the previous prompt (scan upward for SEMANTIC_PROMPT).
+    /// Returns the row found, or -1 if none.
+    fn jumpToPreviousPrompt() i64 {
+        var row = self.cursor_row - 1
+        while (row >= 0) {
+            if (self.grid.getRowSemantic(row) == SEMANTIC_PROMPT) {
+                self.cursor_row = row
+                self.cursor_col = 0
+                self.pending_wrap = false
+                self.scrollToBottom()
+                return row
+            }
+            row -= 1
+        }
+        return -1
+    }
+
+    /// Jump to the next prompt (scan downward for SEMANTIC_PROMPT).
+    /// Returns the row found, or -1 if none.
+    fn jumpToNextPrompt() i64 {
+        var row = self.cursor_row + 1
+        while (row < self.grid.rows) {
+            if (self.grid.getRowSemantic(row) == SEMANTIC_PROMPT) {
+                self.cursor_row = row
+                self.cursor_col = 0
+                self.pending_wrap = false
+                self.scrollToBottom()
+                return row
+            }
+            row += 1
+        }
+        return -1
     }
 
     /// Handle a scroll wheel event. Ported from Ghostty's Surface.scrollCallback.

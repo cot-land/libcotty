@@ -488,8 +488,8 @@ export fn cotty_terminal_child_pid(surface: i64) i64 {
 
 /// Return a pointer to the visible cells for rendering.
 /// Adjusts for viewport position: when scrolled up, returns scrollback rows.
-/// Each cell is 8 contiguous i64 fields: codepoint, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b, flags.
-/// Stride per cell = 8 * 8 = 64 bytes. Total cells = rows * cols.
+/// Each cell is 11 contiguous i64 fields: codepoint, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b, flags, ul_r, ul_g, ul_b.
+/// Stride per cell = 11 * 8 = 88 bytes. Total cells = rows * cols.
 export fn cotty_terminal_cells_ptr(surface: i64) i64 {
     const sptr = getSurfacePtr(surface)
     const grid = sptr.terminal.grid
@@ -736,6 +736,16 @@ export fn cotty_terminal_title_len(surface: i64) i64 {
     return getSurfacePtr(surface).terminal.title_len
 }
 
+/// Return a pointer to the terminal PWD bytes (OSC 7 URI).
+export fn cotty_terminal_pwd(surface: i64) i64 {
+    return getSurfacePtr(surface).terminal.pwd_buf
+}
+
+/// Return the byte length of the terminal PWD.
+export fn cotty_terminal_pwd_len(surface: i64) i64 {
+    return getSurfacePtr(surface).terminal.pwd_len
+}
+
 // ============================================================================
 // Terminal bell
 // ============================================================================
@@ -930,5 +940,24 @@ export fn cotty_inspector_rebuild_terminal_state(surface: i64) void {
     } else if (sptr.inspector.panel == PANEL_MODES) {
         sptr.inspector.rebuildModesFrom(sptr.terminal)
     }
+}
+
+// ============================================================================
+// Semantic Prompts (OSC 133) — Jump to Prompt
+// ============================================================================
+
+/// Jump to the previous prompt row. Returns the row, or -1 if none found.
+export fn cotty_terminal_jump_prev_prompt(surface: i64) i64 {
+    return getSurfacePtr(surface).terminal.jumpToPreviousPrompt()
+}
+
+/// Jump to the next prompt row. Returns the row, or -1 if none found.
+export fn cotty_terminal_jump_next_prompt(surface: i64) i64 {
+    return getSurfacePtr(surface).terminal.jumpToNextPrompt()
+}
+
+/// Return the semantic marker for a row (0=none, 1=prompt, 2=input, 3=output).
+export fn cotty_terminal_row_semantic(surface: i64, row: i64) i64 {
+    return getSurfacePtr(surface).terminal.grid.getRowSemantic(row)
 }
 

@@ -14,6 +14,7 @@ const CELL_BLINK: i64 = 128
 const CELL_HIDDEN: i64 = 256
 const CELL_OVERLINE: i64 = 512
 const CELL_DOUBLE_UNDERLINE: i64 = 1024
+const CELL_CUSTOM_UL_COLOR: i64 = 2048
 
 struct Cell {
     codepoint: i64,
@@ -24,6 +25,9 @@ struct Cell {
     bg_g: i64,
     bg_b: i64,
     flags: i64,
+    ul_r: i64,
+    ul_g: i64,
+    ul_b: i64,
 
     /// Create an empty cell with default colors.
     static fn init() Cell {
@@ -33,6 +37,7 @@ struct Cell {
             fg_r: THEME_FG_R, fg_g: THEME_FG_G, fg_b: THEME_FG_B,
             bg_r: THEME_BG_R, bg_g: THEME_BG_G, bg_b: THEME_BG_B,
             flags: 0,
+            ul_r: -1, ul_g: -1, ul_b: -1,
         }
     }
 
@@ -44,6 +49,7 @@ struct Cell {
             fg_r: THEME_FG_R, fg_g: THEME_FG_G, fg_b: THEME_FG_B,
             bg_r: THEME_BG_R, bg_g: THEME_BG_G, bg_b: THEME_BG_B,
             flags: 0,
+            ul_r: -1, ul_g: -1, ul_b: -1,
         }
     }
 

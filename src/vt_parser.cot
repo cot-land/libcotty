@@ -151,8 +151,14 @@ struct VtParser {
             self.feedCsiParam(terminal, b)
         } else if (self.state == VtState.OscString) {
             if (b == 0x07) {
+                // BEL terminates OSC
                 self.dispatchOsc(terminal)
                 self.state = VtState.Ground
+            } else if (b == 0x1B) {
+                // ESC in OSC — likely start of ST (ESC \)
+                // Dispatch now; the '\' will be consumed in Escape state
+                self.dispatchOsc(terminal)
+                self.state = VtState.Escape
             } else {
                 if (self.osc_buf.count < MAX_OSC_LEN) {
                     self.osc_buf.append(b)
@@ -257,12 +263,22 @@ struct VtParser {
                 terminal.reverseIndex()
                 self.state = VtState.Ground
             },
+            '6' => {
+                // DECBI — Back Index
+                terminal.backIndex()
+                self.state = VtState.Ground
+            },
             '7' => {
                 terminal.saveCursor()
                 self.state = VtState.Ground
             },
             '8' => {
                 terminal.restoreCursor()
+                self.state = VtState.Ground
+            },
+            '9' => {
+                // DECFI — Forward Index
+                terminal.forwardIndex()
                 self.state = VtState.Ground
             },
             'c' => {
@@ -295,6 +311,8 @@ struct VtParser {
                 terminal.double_underline = false
                 terminal.charset_g0 = 0
                 terminal.charset_g1 = 0
+                terminal.charset_g2 = 0
+                terminal.charset_g3 = 0
                 terminal.active_charset = 0
                 terminal.cursor_shape = 0
                 terminal.resetTabstops()
@@ -324,6 +342,33 @@ struct VtParser {
                 terminal.single_shift = 3
                 self.state = VtState.Ground
             },
+            'Z' => {
+                // DECID — Return terminal ID (same as DA1)
+                terminal.sendPrimaryDeviceAttributes()
+                self.state = VtState.Ground
+            },
+            'n' => {
+                // LS2 — Locking Shift G2
+                terminal.active_charset = 2
+                self.state = VtState.Ground
+            },
+            'o' => {
+                // LS3 — Locking Shift G3
+                terminal.active_charset = 3
+                self.state = VtState.Ground
+            },
+            '~' => {
+                // LS1R — Locking Shift 1 Right (stub: GR not tracked)
+                self.state = VtState.Ground
+            },
+            '}' => {
+                // LS2R — Locking Shift 2 Right (stub: GR not tracked)
+                self.state = VtState.Ground
+            },
+            '|' => {
+                // LS3R — Locking Shift 3 Right (stub: GR not tracked)
+                self.state = VtState.Ground
+            },
             'P' => {
                 // DCS — Device Control String
                 self.state = VtState.DcsEntry
@@ -347,6 +392,8 @@ struct VtParser {
         var charset: i64 = 0
         if (b == '0') {
             charset = 1  // DEC Special Graphics
+        } else if (b == 'A') {
+            charset = 2  // UK charset
         }
         // b == 'B' -> ASCII (charset = 0, the default)
 
@@ -354,8 +401,11 @@ struct VtParser {
             terminal.charset_g0 = charset
         } else if (self.esc_intermediate == ')') {
             terminal.charset_g1 = charset
+        } else if (self.esc_intermediate == '*') {
+            terminal.charset_g2 = charset
+        } else if (self.esc_intermediate == '+') {
+            terminal.charset_g3 = charset
         }
-        // G2/G3 (* / +) could be added but are rarely used
 
         self.state = VtState.Ground
     }
@@ -704,6 +754,9 @@ struct VtParser {
                 // DECSCUSR — Set Cursor Style (with space intermediate)
                 if (self.intermediate == ' ') {
                     terminal.cursor_shape = self.rawParam(0, 0)
+                } else if (self.intermediate == '>') {
+                    // XTVERSION — Report terminal version
+                    terminal.sendXtversion()
                 }
             },
             'p' => {
@@ -817,6 +870,15 @@ struct VtParser {
                 terminal.overline = true
             } else if (p == 55) {
                 terminal.overline = false
+            } else if (p == 58) {
+                // SGR 58 — Set underline color (58;2;r;g;b or 58;5;n)
+                self.applySgrUnderlineColor(terminal, i)
+                i = self.skipExtendedColor(i)
+            } else if (p == 59) {
+                // SGR 59 — Reset underline color to default
+                terminal.ul_r = -1
+                terminal.ul_g = -1
+                terminal.ul_b = -1
             } else if (p >= 30 and p <= 37) {
                 const r, g, b = basicColor(p - 30, terminal.palette)
                 terminal.fg_r = r
@@ -895,6 +957,23 @@ struct VtParser {
         return base
     }
 
+    /// Apply SGR 58 — set underline color (same extended color parsing as 38/48).
+    fn applySgrUnderlineColor(terminal: *TerminalState, base: i64) void {
+        if (base + 1 >= self.params.count) { return }
+        const mode = self.params.get(base + 1)
+
+        if (mode == 5 and base + 2 < self.params.count) {
+            const r, g, b = colorFromIndex(self.params.get(base + 2), terminal.palette)
+            terminal.ul_r = r
+            terminal.ul_g = g
+            terminal.ul_b = b
+        } else if (mode == 2 and base + 4 < self.params.count) {
+            terminal.ul_r = self.params.get(base + 2)
+            terminal.ul_g = self.params.get(base + 3)
+            terminal.ul_b = self.params.get(base + 4)
+        }
+    }
+
     // -- Mode dispatch (CSI ? h/l) ------------------------------------------
 
     /// Handle set/reset mode. DEC private modes (? prefix) and standard ANSI modes.
@@ -959,6 +1038,9 @@ struct VtParser {
 
         if (cmd == 0 or cmd == 2) {
             terminal.setTitle(self.osc_buf, payload_start, payload_len)
+        } else if (cmd == 1) {
+            // OSC 1 — icon/tab title: store separately, don't overwrite window title
+            terminal.setIconTitle(self.osc_buf, payload_start, payload_len)
         } else if (cmd == 7) {
             terminal.setPwd(self.osc_buf, payload_start, payload_len)
         } else if (cmd == 4) {
@@ -1011,6 +1093,11 @@ struct VtParser {
             terminal.default_bg_b = THEME_BG_B
         } else if (cmd == 112) {
             // OSC 112 — Reset cursor color (no-op, uses config)
+        } else if (cmd == 133) {
+            // OSC 133 — Semantic prompt: read marker byte (A/B/C/D)
+            if (payload_len > 0) {
+                terminal.handleSemanticPrompt(self.osc_buf.get(payload_start))
+            }
         }
     }
 
@@ -2004,4 +2091,289 @@ test "CSI u push via parser" {
     p.feedEsc(t, "[<1u")
     @assertEq(t.kittyKeyboardFlags(), 3)
     @assertEq(t.kitty_kbd_idx, 1)
+}
+
+// ============================================================================
+// Tests — Batch 1: Missing Modes & ESC Sequences
+// ============================================================================
+
+test "ESC Z returns to ground (DECID → DA1 path)" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    p.feed(t, 0x1B)
+    p.feed(t, 'Z')
+    @assertEq(p.state, VtState.Ground)
+    // sendPrimaryDeviceAttributes would write to pty_fd=-1, just verify state
+}
+
+test "DEL ignored in ground state" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // Put a character, then send DEL
+    p.feed(t, 'A')
+    @assertEq(t.grid.getCell(0, 0).codepoint, 'A')
+    @assertEq(t.cursor_col, 1)
+    p.feed(t, 0x7F)  // DEL
+    // Cursor should not move, cell should not change
+    @assertEq(t.cursor_col, 1)
+    @assertEq(t.grid.getCell(0, 0).codepoint, 'A')
+}
+
+test "OSC title via ST terminator" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 40)
+    // OSC 0 ; long title ESC \ (ST terminator)
+    p.feedEsc(t, "]0;user@host:~/cot-land/cotty")
+    p.feed(t, 0x1B)  // ESC
+    p.feed(t, '\\')  // \ — ST
+    @assertEq(t.title_len, 26)
+    @assertEq(p.state, VtState.Ground)
+}
+
+test "OSC 1 does not overwrite window title" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // Set window title via OSC 2
+    p.feedEsc(t, "]2;long window title")
+    p.feed(t, 0x07)
+    @assertEq(t.title_len, 17)
+    // OSC 1 (icon/tab title) should NOT overwrite it
+    p.feedEsc(t, "]1;short")
+    p.feed(t, 0x07)
+    @assertEq(t.title_len, 17)
+}
+
+test "mode 66 controls app keypad" {
+    var t = TerminalState.init(3, 10)
+    @assert(!t.mode_app_keypad)
+    t.setDecMode(66, true)
+    @assert(t.mode_app_keypad)
+    t.setDecMode(66, false)
+    @assert(!t.mode_app_keypad)
+}
+
+test "mode 67 controls backspace sends BS" {
+    var t = TerminalState.init(3, 10)
+    @assert(!t.mode_backspace_sends_bs)
+    t.setDecMode(67, true)
+    @assert(t.mode_backspace_sends_bs)
+    @assertEq(t.queryDecMode(67), 1)
+    t.setDecMode(67, false)
+    @assert(!t.mode_backspace_sends_bs)
+    @assertEq(t.queryDecMode(67), 2)
+}
+
+test "DECCOLM stub clears screen and resets cursor" {
+    var t = TerminalState.init(3, 10)
+    t.putChar('X')
+    t.cursor_row = 2
+    t.cursor_col = 5
+    t.setDecMode(3, true)
+    @assertEq(t.cursor_row, 0)
+    @assertEq(t.cursor_col, 0)
+    // Screen should be cleared
+    @assertEq(t.grid.getCell(0, 0).codepoint, 0)
+}
+
+test "DECBI at col 0 shifts right" {
+    var t = TerminalState.init(3, 5)
+    // Put 'A' at col 0
+    t.putChar('A')
+    t.cursor_col = 0
+    t.backIndex()
+    // 'A' should have shifted to col 1
+    @assertEq(t.grid.getCell(0, 0).codepoint, 0)
+    @assertEq(t.grid.getCell(0, 1).codepoint, 'A')
+    @assertEq(t.cursor_col, 0)
+}
+
+test "DECBI at col > 0 moves left" {
+    var t = TerminalState.init(3, 5)
+    t.cursor_col = 3
+    t.backIndex()
+    @assertEq(t.cursor_col, 2)
+}
+
+test "DECFI at right margin shifts left" {
+    var t = TerminalState.init(3, 5)
+    // Put chars at cols 0-4
+    t.putChar('A')
+    t.putChar('B')
+    t.putChar('C')
+    t.putChar('D')
+    t.putChar('E')
+    // Cursor is at col 4 with pending_wrap
+    t.cursor_col = 4
+    t.pending_wrap = false
+    t.forwardIndex()
+    // 'A' should be gone, 'B' at col 0, etc.
+    @assertEq(t.grid.getCell(0, 0).codepoint, 'B')
+    @assertEq(t.grid.getCell(0, 3).codepoint, 'E')
+    @assertEq(t.grid.getCell(0, 4).codepoint, 0)
+    @assertEq(t.cursor_col, 4)
+}
+
+test "DECFI at col < max moves right" {
+    var t = TerminalState.init(3, 5)
+    t.cursor_col = 2
+    t.forwardIndex()
+    @assertEq(t.cursor_col, 3)
+}
+
+test "UK charset maps # to pound sign" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // ESC ( A — select UK charset for G0
+    p.feed(t, 0x1B)
+    p.feed(t, '(')
+    p.feed(t, 'A')
+    // Now type '#' — should map to £ (0x00A3)
+    p.feed(t, '#')
+    @assertEq(t.grid.getCell(0, 0).codepoint, 0x00A3)
+}
+
+test "LS2 LS3 activate G2 G3" {
+    var t = TerminalState.init(3, 10)
+    // Designate G2 as DEC Special Graphics
+    t.charset_g2 = 1
+    t.charset_g3 = 1
+    // LS2 — activate G2
+    t.active_charset = 2
+    // Type 'q' (0x71) — should map to ─ (0x2500)
+    t.putChar('q')
+    @assertEq(t.grid.getCell(0, 0).codepoint, 0x2500)
+    // LS3 — activate G3
+    t.active_charset = 3
+    t.putChar('q')
+    @assertEq(t.grid.getCell(0, 1).codepoint, 0x2500)
+}
+
+test "G2 G3 designation via parser" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // ESC * 0 — designate G2 as DEC Special Graphics
+    p.feed(t, 0x1B)
+    p.feed(t, '*')
+    p.feed(t, '0')
+    @assertEq(t.charset_g2, 1)
+    // ESC + A — designate G3 as UK
+    p.feed(t, 0x1B)
+    p.feed(t, '+')
+    p.feed(t, 'A')
+    @assertEq(t.charset_g3, 2)
+}
+
+test "SGR 58;2;r;g;b sets underline color on cell" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // SGR 58;2;255;128;0 — set underline color to orange
+    p.feedEsc(t, "[58;2;255;128;0m")
+    @assertEq(t.ul_r, 255)
+    @assertEq(t.ul_g, 128)
+    @assertEq(t.ul_b, 0)
+    // Write a char — cell should have underline color
+    p.feed(t, 'A')
+    @assertEq(t.grid.getCell(0, 0).ul_r, 255)
+    @assertEq(t.grid.getCell(0, 0).ul_g, 128)
+    @assertEq(t.grid.getCell(0, 0).ul_b, 0)
+    @assert((t.grid.getCell(0, 0).flags & CELL_CUSTOM_UL_COLOR) != 0)
+}
+
+test "SGR 58;5;n sets underline color from palette" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // SGR 58;5;1 — set underline color to palette index 1 (red)
+    p.feedEsc(t, "[58;5;1m")
+    @assert(t.ul_r > 0)
+}
+
+test "SGR 59 resets underline color" {
+    var p = VtParser.init()
+    var t = TerminalState.init(3, 10)
+    // Set then reset
+    p.feedEsc(t, "[58;2;100;200;50m")
+    @assertEq(t.ul_r, 100)
+    p.feedEsc(t, "[59m")
+    @assertEq(t.ul_r, -1)
+    @assertEq(t.ul_g, -1)
+    @assertEq(t.ul_b, -1)
+    // Write a char — cell should NOT have custom underline color flag
+    p.feed(t, 'B')
+    @assert((t.grid.getCell(0, 0).flags & CELL_CUSTOM_UL_COLOR) == 0)
+}
+
+test "mode 2027 grapheme cluster stub" {
+    var t = TerminalState.init(3, 10)
+    t.setDecMode(2027, true)
+    @assert(t.mode_grapheme_cluster)
+    @assertEq(t.queryDecMode(2027), 1)
+    t.setDecMode(2027, false)
+    @assertEq(t.queryDecMode(2027), 2)
+}
+
+// ============================================================================
+// Tests — Batch 3: OSC 133 Semantic Prompts
+// ============================================================================
+
+test "OSC 133;A marks row as SEMANTIC_PROMPT" {
+    var p = VtParser.init()
+    var t = TerminalState.init(5, 10)
+    // OSC 133 ; A BEL
+    p.feedEsc(t, "]133;A")
+    p.feed(t, 0x07)
+    @assertEq(t.grid.getRowSemantic(0), SEMANTIC_PROMPT)
+}
+
+test "OSC 133;B marks row as SEMANTIC_INPUT" {
+    var p = VtParser.init()
+    var t = TerminalState.init(5, 10)
+    p.feedEsc(t, "]133;B")
+    p.feed(t, 0x07)
+    @assertEq(t.grid.getRowSemantic(0), SEMANTIC_INPUT)
+}
+
+test "OSC 133;C marks row as SEMANTIC_OUTPUT" {
+    var p = VtParser.init()
+    var t = TerminalState.init(5, 10)
+    p.feedEsc(t, "]133;C")
+    p.feed(t, 0x07)
+    @assertEq(t.grid.getRowSemantic(0), SEMANTIC_OUTPUT)
+}
+
+test "jump to previous prompt finds correct row" {
+    var t = TerminalState.init(5, 10)
+    // Mark row 1 as prompt
+    t.grid.setRowSemantic(1, SEMANTIC_PROMPT)
+    // Place cursor at row 3
+    t.cursor_row = 3
+    const result = t.jumpToPreviousPrompt()
+    @assertEq(result, 1)
+    @assertEq(t.cursor_row, 1)
+    @assertEq(t.cursor_col, 0)
+}
+
+test "jump to next prompt finds correct row" {
+    var t = TerminalState.init(5, 10)
+    // Mark row 3 as prompt
+    t.grid.setRowSemantic(3, SEMANTIC_PROMPT)
+    // Place cursor at row 1
+    t.cursor_row = 1
+    const result = t.jumpToNextPrompt()
+    @assertEq(result, 3)
+    @assertEq(t.cursor_row, 3)
+    @assertEq(t.cursor_col, 0)
+}
+
+test "jump to previous prompt returns -1 when none" {
+    var t = TerminalState.init(5, 10)
+    t.cursor_row = 0
+    const result = t.jumpToPreviousPrompt()
+    @assertEq(result, -1)
+}
+
+test "jump to next prompt returns -1 when none" {
+    var t = TerminalState.init(5, 10)
+    t.cursor_row = 4
+    const result = t.jumpToNextPrompt()
+    @assertEq(result, -1)
 }
