@@ -169,4 +169,4 @@ Conducted 2026-03-02.
 - [x] 47. ANSI modes 2 (KAM), 12 (SRM) — Added `mode_keyboard_action` and `mode_send_receive` to setAnsiMode
 - [ ] 48. No DECSCA / SPA/EPA (cell protection)
 - [ ] 49. OSC 9, OSC 1337, OSC 22
-- [ ] 50. No copy-on-select
+- [x] 50. Copy-on-select — automatically copies selection to clipboard on mouseUp
