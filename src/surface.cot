@@ -40,7 +40,12 @@ fn ioReaderMain(arg: i64) void {
     defer dealloc(buf)
     while (true) {
         const n = fd_read(fd, buf, 4096)
-        if (n <= 0) { break }
+        if (n <= 0) {
+            // Child process exited — set atomic flag and signal main thread
+            surface.markChildExited()
+            fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
+            break
+        }
         surface.terminal_mutex.lock()
         for i in 0..n {
             const b = @intToPtr(*u8, buf + i).*
@@ -79,6 +84,7 @@ struct Surface {
     notify_pipe_read: i64,
     notify_pipe_write: i64,
     render_dirty: i64,
+    child_exited: i64,
     inspector: Inspector,
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
@@ -102,6 +108,7 @@ struct Surface {
             notify_pipe_read: -1,
             notify_pipe_write: -1,
             render_dirty: 0,
+            child_exited: 0,
             inspector: Inspector.init(24, 80),
         }
     }
@@ -129,6 +136,7 @@ struct Surface {
                 notify_pipe_read: -1,
                 notify_pipe_write: -1,
                 render_dirty: 0,
+                child_exited: 0,
                 inspector: Inspector.init(24, 80),
             }
         }
@@ -148,6 +156,7 @@ struct Surface {
             notify_pipe_read: -1,
             notify_pipe_write: -1,
             render_dirty: 0,
+            child_exited: 0,
             inspector: Inspector.init(24, 80),
         }
     }
@@ -186,6 +195,7 @@ struct Surface {
             notify_pipe_read: pipe_r,
             notify_pipe_write: pipe_w,
             render_dirty: 0,
+            child_exited: 0,
             inspector: Inspector.init(rows, cols),
         }
     }
@@ -332,6 +342,11 @@ struct Surface {
     /// Returns 1 if dirty (needs render), 0 if clean.
     fn checkAndClearDirty() i64 {
         return @atomicExchange(&self.render_dirty, 0)
+    }
+
+    /// Mark child process as exited (atomic). Called by IO thread on EOF.
+    fn markChildExited() void {
+        @atomicStore(&self.child_exited, 1)
     }
 
     /// Return the title for this surface.

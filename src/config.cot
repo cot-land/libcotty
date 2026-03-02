@@ -21,6 +21,7 @@ var THEME_BG_G: i64 = 0
 var THEME_BG_B: i64 = 0
 
 var THEME_PALETTE: List(i64) = undefined
+var THEME_SHELL: string = "/bin/zsh"
 var THEME_READY: i64 = 0
 
 // ============================================================================
@@ -49,6 +50,7 @@ struct Config {
     sel_fg_g: i64,
     sel_fg_b: i64,
     palette: List(i64),
+    shell_command: string,
 
     /// Create a Config with Monokai Remastered defaults.
     static fn init() Config {
@@ -67,6 +69,7 @@ struct Config {
             sel_bg_r: 52, sel_bg_g: 52, sel_bg_b: 52,
             sel_fg_r: 255, sel_fg_g: 255, sel_fg_b: 255,
             palette: palette,
+            shell_command: "/bin/zsh",
         }
     }
 
@@ -105,6 +108,12 @@ struct Config {
         const pad_val = jsonObjectGet(root, "padding")
         if (pad_val != 0 and jsonTag(pad_val) == JSON_INT) {
             cfg.padding = jsonGetInt(pad_val)
+        }
+
+        // Shell
+        const shell_val = jsonObjectGet(root, "command")
+        if (shell_val != 0 and jsonTag(shell_val) == JSON_STRING) {
+            cfg.shell_command = jsonGetString(shell_val)
         }
 
         // Colors
@@ -291,6 +300,89 @@ fn appendPaletteDefaults(list: *List(i64)) void {
 }
 
 // ============================================================================
+// Config Saving
+// ============================================================================
+
+/// Convert a nibble (0–15) to a hex digit character ('0'–'9', 'a'–'f').
+fn hexDigitChar(val: i64) i64 {
+    if (val < 10) { return '0' + val }
+    return 'a' + val - 10
+}
+
+/// Append a "#RRGGBB" hex color string to a StringBuilder.
+fn appendHexColor(sb: *StringBuilder, r: i64, g: i64, b: i64) void {
+    sb.appendByte('"')
+    sb.appendByte('#')
+    sb.appendByte(hexDigitChar(r / 16))
+    sb.appendByte(hexDigitChar(r % 16))
+    sb.appendByte(hexDigitChar(g / 16))
+    sb.appendByte(hexDigitChar(g % 16))
+    sb.appendByte(hexDigitChar(b / 16))
+    sb.appendByte(hexDigitChar(b % 16))
+    sb.appendByte('"')
+}
+
+/// Save a Config to a JSON file at the given path.
+fn saveToFile(cfg: *Config, path: string) void {
+    var sb: StringBuilder = .{}
+    sb.append("{\n")
+
+    // Font settings
+    sb.append("  \"font-family\": \"")
+    sb.append(cfg.font_name)
+    sb.append("\",\n")
+    sb.append("  \"font-size\": ")
+    sb.appendInt(cfg.font_size)
+    sb.append(",\n")
+    if (@lenOf(cfg.ui_font_name) > 0) {
+        sb.append("  \"ui-font-family\": \"")
+        sb.append(cfg.ui_font_name)
+        sb.append("\",\n")
+    }
+    sb.append("  \"ui-font-size\": ")
+    sb.appendInt(cfg.ui_font_size)
+    sb.append(",\n")
+    sb.append("  \"padding\": ")
+    sb.appendInt(cfg.padding)
+    sb.append(",\n")
+
+    // Colors
+    sb.append("  \"background\": ")
+    appendHexColor(sb, cfg.bg_r, cfg.bg_g, cfg.bg_b)
+    sb.append(",\n")
+    sb.append("  \"foreground\": ")
+    appendHexColor(sb, cfg.fg_r, cfg.fg_g, cfg.fg_b)
+    sb.append(",\n")
+    sb.append("  \"cursor-color\": ")
+    appendHexColor(sb, cfg.cursor_r, cfg.cursor_g, cfg.cursor_b)
+    sb.append(",\n")
+    sb.append("  \"selection-background\": ")
+    appendHexColor(sb, cfg.sel_bg_r, cfg.sel_bg_g, cfg.sel_bg_b)
+    sb.append(",\n")
+    sb.append("  \"selection-foreground\": ")
+    appendHexColor(sb, cfg.sel_fg_r, cfg.sel_fg_g, cfg.sel_fg_b)
+    sb.append(",\n")
+
+    // Palette array (16 hex color strings)
+    sb.append("  \"palette\": [\n")
+    if (cfg.palette.count >= 48) {
+        for i in 0..16 {
+            sb.append("    ")
+            const base = i * 3
+            appendHexColor(sb, cfg.palette.get(base), cfg.palette.get(base + 1), cfg.palette.get(base + 2))
+            if (i < 15) {
+                sb.append(",")
+            }
+            sb.append("\n")
+        }
+    }
+    sb.append("  ]\n")
+    sb.append("}\n")
+
+    writeFile(path, sb.toString()) catch {}
+}
+
+// ============================================================================
 // Theme Initialization
 // ============================================================================
 
@@ -322,6 +414,7 @@ fn initThemeDefaults(cfg: *Config) void {
     THEME_BG_G = cfg.bg_g
     THEME_BG_B = cfg.bg_b
     THEME_PALETTE = cfg.palette
+    THEME_SHELL = cfg.shell_command
 }
 
 // ============================================================================
@@ -406,4 +499,23 @@ test "ensureThemeReady lazy init" {
     @assertEq(THEME_PALETTE.count, 48)
     @assertEq(THEME_PALETTE.get(0), 26)
     @assertEq(THEME_PALETTE.get(3), 244)
+}
+
+test "hexDigitChar" {
+    @assertEq(hexDigitChar(0), '0')
+    @assertEq(hexDigitChar(9), '9')
+    @assertEq(hexDigitChar(10), 'a')
+    @assertEq(hexDigitChar(15), 'f')
+}
+
+test "appendHexColor" {
+    var sb: StringBuilder = .{}
+    appendHexColor(sb, 255, 128, 0)
+    @assertEq(sb.toString(), "\"#ff8000\"")
+}
+
+test "appendHexColor black" {
+    var sb: StringBuilder = .{}
+    appendHexColor(sb, 0, 0, 0)
+    @assertEq(sb.toString(), "\"#000000\"")
 }

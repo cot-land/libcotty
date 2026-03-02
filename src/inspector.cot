@@ -288,9 +288,8 @@ struct Inspector {
         for row in 0..self.rows {
             for col in 0..self.cols {
                 const c = self.grid.getCell(row, col)
-                c.bg_r = 30
-                c.bg_g = 30
-                c.bg_b = 35
+                c.bg_type = COLOR_RGB
+                c.bg_val = packRgb(30, 30, 35)
             }
         }
 
@@ -320,9 +319,8 @@ struct Inspector {
         for row in 0..self.rows {
             for col in 0..self.cols {
                 const c = self.grid.getCell(row, col)
-                c.bg_r = 30
-                c.bg_g = 30
-                c.bg_b = 35
+                c.bg_type = COLOR_RGB
+                c.bg_val = packRgb(30, 30, 35)
             }
         }
 
@@ -399,30 +397,41 @@ struct Inspector {
         row += 1
 
         var sb5: StringBuilder = .{}
-        sb5.append("rgb(")
-        sb5.appendInt(terminal.fg_r)
-        sb5.append(", ")
-        sb5.appendInt(terminal.fg_g)
-        sb5.append(", ")
-        sb5.appendInt(terminal.fg_b)
-        sb5.append(")")
+        sb5.append(colorTypeName(terminal.fg_type))
+        if (terminal.fg_type == COLOR_PALETTE) {
+            sb5.append("(")
+            sb5.appendInt(terminal.fg_val)
+            sb5.append(")")
+        } else if (terminal.fg_type == COLOR_RGB) {
+            sb5.append("(")
+            sb5.appendInt(unpackR(terminal.fg_val))
+            sb5.append(",")
+            sb5.appendInt(unpackG(terminal.fg_val))
+            sb5.append(",")
+            sb5.appendInt(unpackB(terminal.fg_val))
+            sb5.append(")")
+        }
         self.writeStr(row, label_col + 2, "Foreground", 130, 130, 140)
         self.writeStr(row, value_col, sb5.toString(), 220, 220, 220)
-        // Color swatch
-        self.writeColorSwatch(row, value_col + @lenOf(sb5.toString()) + 1, terminal.fg_r, terminal.fg_g, terminal.fg_b)
         row += 1
 
         var sb6: StringBuilder = .{}
-        sb6.append("rgb(")
-        sb6.appendInt(terminal.bg_r)
-        sb6.append(", ")
-        sb6.appendInt(terminal.bg_g)
-        sb6.append(", ")
-        sb6.appendInt(terminal.bg_b)
-        sb6.append(")")
+        sb6.append(colorTypeName(terminal.bg_type))
+        if (terminal.bg_type == COLOR_PALETTE) {
+            sb6.append("(")
+            sb6.appendInt(terminal.bg_val)
+            sb6.append(")")
+        } else if (terminal.bg_type == COLOR_RGB) {
+            sb6.append("(")
+            sb6.appendInt(unpackR(terminal.bg_val))
+            sb6.append(",")
+            sb6.appendInt(unpackG(terminal.bg_val))
+            sb6.append(",")
+            sb6.appendInt(unpackB(terminal.bg_val))
+            sb6.append(")")
+        }
         self.writeStr(row, label_col + 2, "Background", 130, 130, 140)
         self.writeStr(row, value_col, sb6.toString(), 220, 220, 220)
-        self.writeColorSwatch(row, value_col + @lenOf(sb6.toString()) + 1, terminal.bg_r, terminal.bg_g, terminal.bg_b)
         row += 2
 
         // -- SGR section --
@@ -473,9 +482,8 @@ struct Inspector {
         for row in 0..self.rows {
             for col in 0..self.cols {
                 const c = self.grid.getCell(row, col)
-                c.bg_r = 30
-                c.bg_g = 30
-                c.bg_b = 35
+                c.bg_type = COLOR_RGB
+                c.bg_val = packRgb(30, 30, 35)
             }
         }
 
@@ -562,9 +570,8 @@ struct Inspector {
             if (i % 2 == 1) {
                 for ac in 0..self.cols {
                     const cell = self.grid.getCell(display_row, ac)
-                    cell.bg_r = 35
-                    cell.bg_g = 35
-                    cell.bg_b = 42
+                    cell.bg_type = COLOR_RGB
+                    cell.bg_val = packRgb(35, 35, 42)
                 }
             }
 
@@ -616,9 +623,8 @@ struct Inspector {
             if (i % 2 == 1) {
                 for ac in 0..self.cols {
                     const cell = self.grid.getCell(display_row, ac)
-                    cell.bg_r = 35
-                    cell.bg_g = 35
-                    cell.bg_b = 42
+                    cell.bg_type = COLOR_RGB
+                    cell.bg_val = packRgb(35, 35, 42)
                 }
             }
 
@@ -679,12 +685,10 @@ struct Inspector {
         for col in 0..self.cols {
             const c = self.grid.getCell(row, col)
             c.codepoint = 0
-            c.fg_r = 0
-            c.fg_g = 0
-            c.fg_b = 0
-            c.bg_r = 30
-            c.bg_g = 30
-            c.bg_b = 35
+            c.fg_type = COLOR_NONE
+            c.fg_val = 0
+            c.bg_type = COLOR_RGB
+            c.bg_val = packRgb(30, 30, 35)
         }
     }
 
@@ -694,9 +698,8 @@ struct Inspector {
         for col in 0..self.cols {
             const c = self.grid.getCell(row, col)
             c.codepoint = 0x2500  // ─
-            c.fg_r = 50
-            c.fg_g = 50
-            c.fg_b = 60
+            c.fg_type = COLOR_RGB
+            c.fg_val = packRgb(50, 50, 60)
         }
     }
 
@@ -706,9 +709,8 @@ struct Inspector {
             if (col + i >= self.cols) { return col + i }
             const c = self.grid.getCell(row, col + i)
             c.codepoint = @intToPtr(*u8, @ptrOf(s) + i).*
-            c.fg_r = r
-            c.fg_g = g
-            c.fg_b = b
+            c.fg_type = COLOR_RGB
+            c.fg_val = packRgb(r, g, b)
         }
         return col + @lenOf(s)
     }
@@ -720,9 +722,8 @@ struct Inspector {
             if (col + i >= self.cols) { break }
             const c = self.grid.getCell(row, col + i)
             c.codepoint = 0x2588  // █ full block
-            c.fg_r = r
-            c.fg_g = g
-            c.fg_b = b
+            c.fg_type = COLOR_RGB
+            c.fg_val = packRgb(r, g, b)
         }
     }
 }
@@ -730,6 +731,15 @@ struct Inspector {
 // ============================================================================
 // Formatting helpers
 // ============================================================================
+
+fn colorTypeName(t: i64) string {
+    return switch (t) {
+        COLOR_NONE => "default",
+        COLOR_PALETTE => "palette",
+        COLOR_RGB => "rgb",
+        else => "?",
+    }
+}
 
 fn cursorShapeName(shape: i64) string {
     return switch (shape) {

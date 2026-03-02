@@ -1,4 +1,5 @@
-/// Terminal cell: a single character with foreground/background colors and flags.
+/// Terminal cell: a single character with semantic color types and flags.
+/// Colors use type+value encoding: none (use default), palette index, or packed RGB.
 
 import "config"
 
@@ -16,40 +17,60 @@ const CELL_OVERLINE: i64 = 512
 const CELL_DOUBLE_UNDERLINE: i64 = 1024
 const CELL_CUSTOM_UL_COLOR: i64 = 2048
 
+/// Color type constants — Ghostty-style semantic color encoding.
+const COLOR_NONE: i64 = 0     // Use terminal default (fg→theme fg, bg→theme bg)
+const COLOR_PALETTE: i64 = 1  // val = palette index 0-255
+const COLOR_RGB: i64 = 2      // val = (r << 16) | (g << 8) | b
+
+/// Pack RGB components into a single i64 value.
+fn packRgb(r: i64, g: i64, b: i64) i64 {
+    return (r << 16) | (g << 8) | b
+}
+
+/// Unpack the red component from a packed RGB value.
+fn unpackR(val: i64) i64 {
+    return (val >> 16) & 0xFF
+}
+
+/// Unpack the green component from a packed RGB value.
+fn unpackG(val: i64) i64 {
+    return (val >> 8) & 0xFF
+}
+
+/// Unpack the blue component from a packed RGB value.
+fn unpackB(val: i64) i64 {
+    return val & 0xFF
+}
+
 struct Cell {
     codepoint: i64,
-    fg_r: i64,
-    fg_g: i64,
-    fg_b: i64,
-    bg_r: i64,
-    bg_g: i64,
-    bg_b: i64,
+    fg_type: i64,
+    fg_val: i64,
+    bg_type: i64,
+    bg_val: i64,
     flags: i64,
-    ul_r: i64,
-    ul_g: i64,
-    ul_b: i64,
+    ul_type: i64,
+    ul_val: i64,
 
-    /// Create an empty cell with default colors.
+    /// Create an empty cell with default colors (COLOR_NONE).
     static fn init() Cell {
-        ensureThemeReady()
         return Cell {
             codepoint: 0,
-            fg_r: THEME_FG_R, fg_g: THEME_FG_G, fg_b: THEME_FG_B,
-            bg_r: THEME_BG_R, bg_g: THEME_BG_G, bg_b: THEME_BG_B,
+            fg_type: COLOR_NONE, fg_val: 0,
+            bg_type: COLOR_NONE, bg_val: 0,
             flags: 0,
-            ul_r: -1, ul_g: -1, ul_b: -1,
+            ul_type: COLOR_NONE, ul_val: 0,
         }
     }
 
     /// Create a cell with the given codepoint and default colors.
     static fn initChar(cp: i64) Cell {
-        ensureThemeReady()
         return Cell {
             codepoint: cp,
-            fg_r: THEME_FG_R, fg_g: THEME_FG_G, fg_b: THEME_FG_B,
-            bg_r: THEME_BG_R, bg_g: THEME_BG_G, bg_b: THEME_BG_B,
+            fg_type: COLOR_NONE, fg_val: 0,
+            bg_type: COLOR_NONE, bg_val: 0,
             flags: 0,
-            ul_r: -1, ul_g: -1, ul_b: -1,
+            ul_type: COLOR_NONE, ul_val: 0,
         }
     }
 
@@ -76,18 +97,16 @@ test "cell initChar stores codepoint" {
     @assert(!c.isBlank())
 }
 
-test "cell default fg color" {
+test "cell default fg is COLOR_NONE" {
     var c = Cell.init()
-    @assertEq(c.fg_r, 217)
-    @assertEq(c.fg_g, 217)
-    @assertEq(c.fg_b, 217)
+    @assertEq(c.fg_type, COLOR_NONE)
+    @assertEq(c.fg_val, 0)
 }
 
-test "cell default bg color" {
+test "cell default bg is COLOR_NONE" {
     var c = Cell.init()
-    @assertEq(c.bg_r, 12)
-    @assertEq(c.bg_g, 12)
-    @assertEq(c.bg_b, 12)
+    @assertEq(c.bg_type, COLOR_NONE)
+    @assertEq(c.bg_val, 0)
 }
 
 test "cell space is blank" {
@@ -99,4 +118,11 @@ test "cell flags" {
     var c = Cell.init()
     c.flags = CELL_BOLD | CELL_UNDERLINE
     @assertEq(c.flags, 3)
+}
+
+test "packRgb and unpack" {
+    const val = packRgb(255, 128, 0)
+    @assertEq(unpackR(val), 255)
+    @assertEq(unpackG(val), 128)
+    @assertEq(unpackB(val), 0)
 }

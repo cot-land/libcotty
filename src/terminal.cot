@@ -585,6 +585,8 @@ struct TerminalState {
     mode_sixel_scrolling: bool,
     mode_grapheme_cluster: bool,
     mode_linefeed_newline: bool,
+    mode_report_color_scheme: bool,
+    mode_modify_other_keys: i64,
 
     // XTSAVE/XTRESTORE — saved DEC private mode state (CSI ? s / CSI ? r)
     // Ghostty ref: modes.zig ModeState — parallel saved bitfield
@@ -751,6 +753,8 @@ struct TerminalState {
             mode_sixel_scrolling: false,
             mode_grapheme_cluster: false,
             mode_linefeed_newline: false,
+            mode_report_color_scheme: false,
+            mode_modify_other_keys: 0,
             xtsaved_app_cursor: false,
             xtsaved_origin: false,
             xtsaved_wraparound: true,
@@ -1621,6 +1625,7 @@ struct TerminalState {
             69 => { self.mode_left_right_margin = enable },
             80 => { self.mode_sixel_scrolling = enable },
             2027 => { self.mode_grapheme_cluster = enable },
+            2031 => { self.mode_report_color_scheme = enable },
             else => {},
         }
     }
@@ -1725,6 +1730,7 @@ struct TerminalState {
             69 => { if (self.mode_left_right_margin) { return 1 } else { return 2 } },
             80 => { if (self.mode_sixel_scrolling) { return 1 } else { return 2 } },
             2027 => { if (self.mode_grapheme_cluster) { return 1 } else { return 2 } },
+            2031 => { if (self.mode_report_color_scheme) { return 1 } else { return 2 } },
             else => 0,
         }
     }
@@ -1850,6 +1856,34 @@ struct TerminalState {
     fn sendOperatingStatus() void {
         if (self.pty_fd < 0) { return }
         writeStr(self.pty_fd, "\x1b[0n")
+    }
+
+    /// DECALN — Fill the entire screen with 'E' for alignment testing.
+    fn decaln() void {
+        for row in 0..self.grid.rows {
+            for col in 0..self.grid.cols {
+                var cell = self.grid.getCell(row, col)
+                cell.codepoint = 'E'
+                cell.fg_type = COLOR_NONE
+                cell.fg_val = 0
+                cell.bg_type = COLOR_NONE
+                cell.bg_val = 0
+            }
+        }
+        self.setCursorPos(0, 0)
+    }
+
+    /// Send color scheme report: CSI ? 997 ; Ps n
+    /// Ps = 1 (dark), 2 (light). Based on bg luminance.
+    fn sendColorSchemeReport() void {
+        if (self.pty_fd < 0) { return }
+        // Perceptual luminance: 0.299R + 0.587G + 0.114B (scaled by 1000)
+        const lum = THEME_BG_R * 299 + THEME_BG_G * 587 + THEME_BG_B * 114
+        if (lum < 128000) {
+            writeStr(self.pty_fd, "\x1b[?997;1n")
+        } else {
+            writeStr(self.pty_fd, "\x1b[?997;2n")
+        }
     }
 
     /// Send focus gained/lost event to the PTY (CSI I / CSI O).

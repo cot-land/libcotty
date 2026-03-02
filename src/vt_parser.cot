@@ -253,12 +253,18 @@ struct VtParser {
                 self.state = VtState.OscString
                 self.osc_buf.count = 0
             },
-            '(', ')', '*', '+' => {
-                // Charset designation: ESC ( / ) / * / + -> intermediate
+            '(', ')', '*', '+', '#' => {
+                // Charset designation / DECALN: ESC ( / ) / * / + / # -> intermediate
                 self.esc_intermediate = b
                 self.state = VtState.EscIntermediate
             },
             'D' => {
+                terminal.index_()
+                self.state = VtState.Ground
+            },
+            'E' => {
+                // NEL — Next Line (CR + index)
+                terminal.cursor_col = 0
                 terminal.index_()
                 self.state = VtState.Ground
             },
@@ -312,6 +318,8 @@ struct VtParser {
                 terminal.mode_cursor_blinking = false
                 terminal.mode_reverse_wrap = false
                 terminal.mode_app_keypad = false
+                terminal.mode_report_color_scheme = false
+                terminal.mode_modify_other_keys = 0
                 terminal.single_shift = 0
                 terminal.blink = false
                 terminal.hidden = false
@@ -397,6 +405,15 @@ struct VtParser {
 
     /// Handle final byte of a charset designation sequence (ESC ( / ) / * / + final).
     fn feedEscIntermediate(terminal: *TerminalState, b: i64) void {
+        if (self.esc_intermediate == '#') {
+            if (b == '8') {
+                // DECALN — Screen Alignment Pattern (fill with 'E')
+                terminal.decaln()
+            }
+            self.state = VtState.Ground
+            return
+        }
+
         var charset: i64 = 0
         if (b == '0') {
             charset = 1  // DEC Special Graphics
@@ -572,6 +589,50 @@ struct VtParser {
             // RGB — direct color capability
             value = "8/8/8"
             found = true
+        } else if (name_len == 5 and name_buf == 0x736D637570) {
+            // smcup — enter alt screen
+            value = "\x1b[?1049h"
+            found = true
+        } else if (name_len == 5 and name_buf == 0x726D637570) {
+            // rmcup — leave alt screen
+            value = "\x1b[?1049l"
+            found = true
+        } else if (name_len == 4 and name_buf == 0x73677230) {
+            // sgr0 — reset all attributes
+            value = "\x1b[m"
+            found = true
+        } else if (name_len == 3 and name_buf == 0x62656C) {
+            // bel — bell
+            value = "\x07"
+            found = true
+        } else if (name_len == 5 and name_buf == 0x6369766973) {
+            // civis — hide cursor
+            value = "\x1b[?25l"
+            found = true
+        } else if (name_len == 5 and name_buf == 0x636E6F726D) {
+            // cnorm — show cursor
+            value = "\x1b[?25h"
+            found = true
+        } else if (name_len == 5 and name_buf == 0x636C656172) {
+            // clear — clear screen and home
+            value = "\x1b[H\x1b[2J"
+            found = true
+        } else if (name_len == 2 and name_buf == 0x656C) {
+            // el — erase to end of line
+            value = "\x1b[K"
+            found = true
+        } else if (name_len == 2 and name_buf == 0x6564) {
+            // ed — erase to end of screen
+            value = "\x1b[J"
+            found = true
+        } else if (name_len == 2 and name_buf == 0x6F70) {
+            // op — reset fg/bg to defaults
+            value = "\x1b[39;49m"
+            found = true
+        } else if (name_len == 4 and name_buf == 0x686F6D65) {
+            // home — cursor home
+            value = "\x1b[H"
+            found = true
         }
 
         if (!found) {
@@ -716,6 +777,9 @@ struct VtParser {
                         terminal.saveDecMode(self.params.get(i))
                         i += 1
                     }
+                } else if (self.intermediate == 0 and self.params.count == 0) {
+                    // SCOSC — xterm save cursor position
+                    terminal.saveCursor()
                 }
             },
             'S' => {
@@ -743,7 +807,12 @@ struct VtParser {
             'n' => {
                 // DSR — Device Status Report
                 const dsrParam = self.param(0, 0)
-                if (dsrParam == 5) {
+                if (self.intermediate == '?') {
+                    // DEC-private DSR
+                    if (dsrParam == 996) {
+                        terminal.sendColorSchemeReport()
+                    }
+                } else if (dsrParam == 5) {
                     terminal.sendOperatingStatus()
                 } else if (dsrParam == 6) {
                     terminal.sendCursorPositionReport()
@@ -828,6 +897,9 @@ struct VtParser {
                 } else if (self.intermediate == '=') {
                     // Set flags: param 1 = mode (1=set, 2=or, 3=not)
                     terminal.kittyKeyboardSetFlags(self.param(1, 1), self.rawParam(0, 0))
+                } else if (self.intermediate == 0) {
+                    // SCORC — xterm restore cursor position
+                    terminal.restoreCursor()
                 }
             },
             else => {},
@@ -996,6 +1068,18 @@ struct VtParser {
             while (i < self.params.count) {
                 terminal.setDecMode(self.params.get(i), enable)
                 i += 1
+            }
+        } else if (self.intermediate == '>') {
+            // CSI > Ps m — modifyOtherKeys and related
+            const mode = self.param(0, 0)
+            if (mode == 4) {
+                if (enable) {
+                    // CSI > 4 ; Pv m — set modifyOtherKeys level
+                    terminal.mode_modify_other_keys = self.param(1, 0)
+                } else {
+                    // CSI > 4 l — reset modifyOtherKeys
+                    terminal.mode_modify_other_keys = 0
+                }
             }
         } else if (self.intermediate == 0) {
             // Standard ANSI modes (e.g., mode 4 = IRM)

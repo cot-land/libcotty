@@ -86,10 +86,12 @@ Conducted 2026-03-02.
 - Fixed: Full RIS implemented in vt_parser.cot — clears screen, resets modes, exits alt screen
 
 ### 19. XTGETTCAP only handles 3 capabilities
-- [ ] Only TN, Co, RGB. neovim requests smcup, rmcup, setaf, sgr, kcuu1 and many others.
+- [x] Only TN, Co, RGB. neovim requests smcup, rmcup, setaf, sgr, kcuu1 and many others.
+- Fixed: Added smcup, rmcup, sgr0, bel, civis, cnorm, clear, el, ed, op, home (14 total)
 
 ### 20. Child process exit doesn't auto-close tab
-- [ ] Notify pipe EOF detected but tab stays open as dead session.
+- [x] Notify pipe EOF detected but tab stays open as dead session.
+- Fixed: IO thread sets atomic `child_exited` flag on EOF, Swift notify pipe handler checks flag and closes tab
 
 ---
 
@@ -99,7 +101,8 @@ Conducted 2026-03-02.
 - [ ] Modern CLIs (gh, cargo, delta) emit hyperlinks. No cell-level hyperlink tracking.
 
 ### 22. `modifyOtherKeys` (`CSI > Ps m`) missing
-- [ ] neovim sets modifyOtherKeys level 2 for extended key encoding.
+- [x] neovim sets modifyOtherKeys level 2 for extended key encoding.
+- Fixed: Added `mode_modify_other_keys` field, `>` intermediate handling in dispatchMode for CSI > 4 m/l
 
 ### 23. Super/Cmd never included in modifier parameter
 - [ ] Swift never passes Cmd in mods. Kitty mods also miss caps_lock, num_lock, hyper, meta.
@@ -115,7 +118,8 @@ Conducted 2026-03-02.
 - [ ] Option always treated as Alt. Users wanting Option+e → é get ESC e instead.
 
 ### 27. Mode 2031 (report_color_scheme) missing
-- [ ] neovim uses this for dark/light theme detection.
+- [x] neovim uses this for dark/light theme detection.
+- Fixed: Added mode 2031 to setDecMode/queryDecMode, DSR 996 responds with CSI ? 997 ; 1/2 n based on bg luminance
 
 ### 28. Selection broken across scrollback
 - [ ] sel_start_row/sel_end_row are active-grid-relative, don't account for scrollback offset.
@@ -135,7 +139,8 @@ Conducted 2026-03-02.
 - Fixed: Early check in `feed()` — CAN/SUB transitions to Ground from any state
 
 ### 33. No configurable shell command
-- [ ] Hardcoded to /bin/zsh. No `command` config option.
+- [x] Hardcoded to /bin/zsh. No `command` config option.
+- Fixed: Added `shell_command` to Config, `THEME_SHELL` global, `"command"` JSON key. Pty.spawn uses config value.
 
 ### 34. No shell integration injection
 - [ ] OSC 133 parsing works but shell must be manually configured.
@@ -147,15 +152,15 @@ Conducted 2026-03-02.
 - [ ] 35. No search (Ctrl+F)
 - [ ] 36. No block/rectangular selection
 - [ ] 37. No eraseDisplay mode 22 (scroll-clear)
-- [ ] 38. DECALN (ESC # 8)
-- [ ] 39. ESC E (NEL — next line)
+- [x] 38. DECALN (ESC # 8) — fills screen with 'E', resets cursor. Added `#` intermediate routing and `decaln()`.
+- [x] 39. ESC E (NEL — next line) — CR + index. Added to ESC dispatch.
 - [ ] 40. No emoji/color glyph atlas
 - [ ] 41. No per-row dirty tracking
 - [ ] 42. No mouse-hide-while-typing
 - [ ] 43. No minimum-contrast
 - [ ] 44. No background-opacity/transparency
 - [ ] 45. Numpad keys, F13-F25, modifier keys as events
-- [ ] 46. No bare `CSI u` for xterm restore-cursor
+- [x] 46. No bare `CSI u` for xterm restore-cursor — Added SCORC (CSI u) and SCOSC (CSI s) for xterm cursor save/restore
 - [ ] 47. ANSI modes 2 (KAM), 12 (SRM)
 - [ ] 48. No DECSCA / SPA/EPA (cell protection)
 - [ ] 49. OSC 9, OSC 1337, OSC 22

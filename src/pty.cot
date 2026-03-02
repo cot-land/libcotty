@@ -4,6 +4,7 @@
 import "std/sys"
 import "std/process"
 import "std/mem"
+import "config"
 
 /// Unpack the master fd from openpty()/pipe() packed result.
 fn masterFd(fds: i64) i64 {
@@ -124,7 +125,7 @@ struct Pty {
         // in the child — other threads may hold locks that are copied
         // as locked. Only async-signal-safe functions (exec, dup2,
         // close, setsid) are allowed in the child.
-        const shell = "/bin/zsh"
+        const shell = THEME_SHELL
         const path = buildPath(shell)
         const argv = argvBuild1(shell)
         const envp = buildPtyEnvp()

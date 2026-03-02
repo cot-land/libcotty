@@ -434,6 +434,13 @@ export fn cotty_terminal_check_dirty(surface: i64) i64 {
     return getSurfacePtr(surface).checkAndClearDirty()
 }
 
+/// Check if the child process has exited (atomic flag set by IO thread).
+/// Returns 1 if child exited, 0 if still running.
+export fn cotty_terminal_child_exited(surface: i64) i64 {
+    const s = getSurfacePtr(surface)
+    return @atomicLoad(&s.child_exited)
+}
+
 // ============================================================================
 // Terminal I/O
 // ============================================================================

@@ -1,0 +1,329 @@
+/// Theme palette: visual theme switcher overlay.
+/// Follows the same pattern as command_palette.cot.
+/// All logic lives in Cot. Swift only renders the overlay and forwards keystrokes.
+
+import "std/list"
+import "std/sys"
+import "std/string"
+import "config"
+import "command_palette"
+
+/// A single theme entry with all color values.
+struct ThemeEntry {
+    name_ptr: i64,
+    name_len: i64,
+    bg_r: i64, bg_g: i64, bg_b: i64,
+    fg_r: i64, fg_g: i64, fg_b: i64,
+    cursor_r: i64, cursor_g: i64, cursor_b: i64,
+    sel_bg_r: i64, sel_bg_g: i64, sel_bg_b: i64,
+    sel_fg_r: i64, sel_fg_g: i64, sel_fg_b: i64,
+    palette: List(i64),
+}
+
+/// Theme palette state. Mirrors CommandPalette structure.
+struct ThemePalette {
+    themes: List(ThemeEntry),
+    filtered: List(i64),
+    query: List(u8),
+    active: bool,
+    selected: i64,
+
+    static fn init() ThemePalette {
+        var themes: List(ThemeEntry) = .{}
+        var filtered: List(i64) = .{}
+        var query: List(u8) = .{}
+
+        return ThemePalette {
+            themes: themes,
+            filtered: filtered,
+            query: query,
+            active: false,
+            selected: 0,
+        }
+    }
+
+    /// Register a theme entry.
+    fn addTheme(entry: ThemeEntry) void {
+        self.themes.append(entry)
+    }
+
+    /// Toggle the palette open/closed.
+    fn toggle() void {
+        if (self.active) {
+            self.dismiss()
+        } else {
+            self.active = true
+            self.query.count = 0
+            self.selected = 0
+            self.filter()
+        }
+    }
+
+    /// Dismiss the palette.
+    fn dismiss() void {
+        self.active = false
+        self.query.count = 0
+        self.selected = 0
+    }
+
+    /// Set the query from raw bytes and re-filter.
+    fn setQuery(ptr: *u8, len: i64) void {
+        self.query.count = 0
+        for i in 0..len {
+            const b = @intToPtr(*u8, @ptrToInt(ptr) + i).*
+            self.query.append(b)
+        }
+        self.selected = 0
+        self.filter()
+    }
+
+    /// Filter themes by case-insensitive substring match against query.
+    fn filter() void {
+        self.filtered.count = 0
+
+        if (self.query.count == 0) {
+            for i in 0..self.themes.count {
+                self.filtered.append(i)
+            }
+            return
+        }
+
+        for i in 0..self.themes.count {
+            const entry = self.themes.get(i)
+            if (substringMatch(entry.name_ptr, entry.name_len, self.query.items, self.query.count)) {
+                self.filtered.append(i)
+            }
+        }
+    }
+
+    /// Return the number of filtered results.
+    fn resultCount() i64 {
+        return self.filtered.count
+    }
+
+    /// Return the title pointer for a filtered result.
+    fn resultTitle(index: i64) i64 {
+        if (index < 0 or index >= self.filtered.count) { return 0 }
+        const theme_idx = self.filtered.get(index)
+        return self.themes.get(theme_idx).name_ptr
+    }
+
+    /// Return the title length for a filtered result.
+    fn resultTitleLen(index: i64) i64 {
+        if (index < 0 or index >= self.filtered.count) { return 0 }
+        const theme_idx = self.filtered.get(index)
+        return self.themes.get(theme_idx).name_len
+    }
+
+    /// Return the theme entry at the given filtered index.
+    fn getSelectedTheme(index: i64) ThemeEntry {
+        if (index < 0 or index >= self.filtered.count) {
+            return self.themes.get(0)
+        }
+        const theme_idx = self.filtered.get(index)
+        return self.themes.get(theme_idx)
+    }
+
+    /// Move selection up.
+    fn moveUp() void {
+        if (self.selected > 0) {
+            self.selected -= 1
+        }
+    }
+
+    /// Move selection down.
+    fn moveDown() void {
+        if (self.selected < self.filtered.count - 1) {
+            self.selected += 1
+        }
+    }
+}
+
+/// Apply a ThemeEntry's colors to a Config struct and update global theme defaults.
+fn applyThemeToConfig(entry: ThemeEntry, cfg: *Config) void {
+    cfg.bg_r = entry.bg_r
+    cfg.bg_g = entry.bg_g
+    cfg.bg_b = entry.bg_b
+    cfg.fg_r = entry.fg_r
+    cfg.fg_g = entry.fg_g
+    cfg.fg_b = entry.fg_b
+    cfg.cursor_r = entry.cursor_r
+    cfg.cursor_g = entry.cursor_g
+    cfg.cursor_b = entry.cursor_b
+    cfg.sel_bg_r = entry.sel_bg_r
+    cfg.sel_bg_g = entry.sel_bg_g
+    cfg.sel_bg_b = entry.sel_bg_b
+    cfg.sel_fg_r = entry.sel_fg_r
+    cfg.sel_fg_g = entry.sel_fg_g
+    cfg.sel_fg_b = entry.sel_fg_b
+    cfg.palette = entry.palette
+    initThemeDefaults(cfg)
+}
+
+// ============================================================================
+// Hardcoded Theme Data
+// ============================================================================
+
+/// Monokai Remastered — current default theme (matches Config.init() defaults).
+fn monokaiRemastered() ThemeEntry {
+    var palette: List(i64) = .{}
+    appendPaletteDefaults(palette)
+    const name = "Monokai Remastered"
+    return ThemeEntry {
+        name_ptr: @ptrOf(name), name_len: @lenOf(name),
+        bg_r: 12, bg_g: 12, bg_b: 12,
+        fg_r: 217, fg_g: 217, fg_b: 217,
+        cursor_r: 252, cursor_g: 151, cursor_b: 31,
+        sel_bg_r: 52, sel_bg_g: 52, sel_bg_b: 52,
+        sel_fg_r: 255, sel_fg_g: 255, sel_fg_b: 255,
+        palette: palette,
+    }
+}
+
+/// Catppuccin Mocha — from Ghostty reference.
+fn catppuccinMocha() ThemeEntry {
+    var palette: List(i64) = .{}
+    // Color 0: #45475a
+    palette.append(69)
+    palette.append(71)
+    palette.append(90)
+    // Color 1: #f38ba8
+    palette.append(243)
+    palette.append(139)
+    palette.append(168)
+    // Color 2: #a6e3a1
+    palette.append(166)
+    palette.append(227)
+    palette.append(161)
+    // Color 3: #f9e2af
+    palette.append(249)
+    palette.append(226)
+    palette.append(175)
+    // Color 4: #89b4fa
+    palette.append(137)
+    palette.append(180)
+    palette.append(250)
+    // Color 5: #f5c2e7
+    palette.append(245)
+    palette.append(194)
+    palette.append(231)
+    // Color 6: #94e2d5
+    palette.append(148)
+    palette.append(226)
+    palette.append(213)
+    // Color 7: #bac2de
+    palette.append(186)
+    palette.append(194)
+    palette.append(222)
+    // Color 8: #585b70
+    palette.append(88)
+    palette.append(91)
+    palette.append(112)
+    // Color 9: #f38ba8
+    palette.append(243)
+    palette.append(139)
+    palette.append(168)
+    // Color 10: #a6e3a1
+    palette.append(166)
+    palette.append(227)
+    palette.append(161)
+    // Color 11: #f9e2af
+    palette.append(249)
+    palette.append(226)
+    palette.append(175)
+    // Color 12: #89b4fa
+    palette.append(137)
+    palette.append(180)
+    palette.append(250)
+    // Color 13: #f5c2e7
+    palette.append(245)
+    palette.append(194)
+    palette.append(231)
+    // Color 14: #94e2d5
+    palette.append(148)
+    palette.append(226)
+    palette.append(213)
+    // Color 15: #a6adc8
+    palette.append(166)
+    palette.append(173)
+    palette.append(200)
+    const name = "Catppuccin Mocha"
+    return ThemeEntry {
+        name_ptr: @ptrOf(name), name_len: @lenOf(name),
+        bg_r: 30, bg_g: 30, bg_b: 46,
+        fg_r: 205, fg_g: 214, fg_b: 244,
+        cursor_r: 245, cursor_g: 224, cursor_b: 220,
+        sel_bg_r: 88, sel_bg_g: 91, sel_bg_b: 112,
+        sel_fg_r: 205, sel_fg_g: 214, sel_fg_b: 244,
+        palette: palette,
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "theme palette init" {
+    var tp = ThemePalette.init()
+    @assertEq(tp.active, false)
+    @assertEq(tp.themes.count, 0)
+    @assertEq(tp.filtered.count, 0)
+}
+
+test "theme palette add and filter" {
+    var tp = ThemePalette.init()
+    tp.addTheme(monokaiRemastered())
+    tp.addTheme(catppuccinMocha())
+    @assertEq(tp.themes.count, 2)
+
+    tp.toggle()
+    @assertEq(tp.active, true)
+    @assertEq(tp.filtered.count, 2)
+
+    tp.toggle()
+    @assertEq(tp.active, false)
+}
+
+test "theme palette filter by query" {
+    var tp = ThemePalette.init()
+    tp.addTheme(monokaiRemastered())
+    tp.addTheme(catppuccinMocha())
+    tp.active = true
+
+    const q = "cat"
+    tp.setQuery(@intToPtr(*u8, @ptrOf(q)), @lenOf(q))
+    @assertEq(tp.filtered.count, 1)
+    @assertEq(tp.resultTitleLen(0), 16) // "Catppuccin Mocha"
+}
+
+test "theme palette apply" {
+    var cfg = Config.init()
+    const entry = catppuccinMocha()
+    applyThemeToConfig(entry, cfg)
+    @assertEq(cfg.bg_r, 30)
+    @assertEq(cfg.bg_g, 30)
+    @assertEq(cfg.bg_b, 46)
+    @assertEq(cfg.fg_r, 205)
+    @assertEq(cfg.fg_g, 214)
+    @assertEq(cfg.fg_b, 244)
+}
+
+test "monokai remastered theme" {
+    const entry = monokaiRemastered()
+    @assertEq(entry.bg_r, 12)
+    @assertEq(entry.bg_g, 12)
+    @assertEq(entry.bg_b, 12)
+    @assertEq(entry.palette.count, 48)
+}
+
+test "catppuccin mocha theme" {
+    const entry = catppuccinMocha()
+    @assertEq(entry.bg_r, 30)
+    @assertEq(entry.bg_g, 30)
+    @assertEq(entry.bg_b, 46)
+    @assertEq(entry.palette.count, 48)
+    // Color 0: #45475a = (69, 71, 90)
+    @assertEq(entry.palette.get(0), 69)
+    @assertEq(entry.palette.get(1), 71)
+    @assertEq(entry.palette.get(2), 90)
+}
