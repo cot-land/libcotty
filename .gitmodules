@@ -4,3 +4,6 @@
 [submodule "references/zed"]
 	path = references/zed
 	url = https://github.com/zed-industries/zed.git
+[submodule "references/helix"]
+	path = references/helix
+	url = https://github.com/helix-editor/helix.git
