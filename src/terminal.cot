@@ -211,6 +211,45 @@ struct TerminalGrid {
         self.clearLineWith(top, blank)
     }
 
+    /// Scroll the region [top..bottom] up by one line within columns [left..right].
+    /// Only the specified column range is affected; other columns stay in place.
+    fn scrollUpColumns(top: i64, bottom: i64, left: i64, right: i64, blank: *Cell) void {
+        var row = top
+        while (row < bottom) {
+            var col = left
+            while (col <= right) {
+                self.getCell(row, col).* = self.getCell(row + 1, col).*
+                col += 1
+            }
+            row += 1
+        }
+        // Clear the bottom row in [left..right]
+        var c = left
+        while (c <= right) {
+            self.getCell(bottom, c).* = blank.*
+            c += 1
+        }
+    }
+
+    /// Scroll the region [top..bottom] down by one line within columns [left..right].
+    fn scrollDownColumns(top: i64, bottom: i64, left: i64, right: i64, blank: *Cell) void {
+        var row = bottom
+        while (row > top) {
+            var col = left
+            while (col <= right) {
+                self.getCell(row, col).* = self.getCell(row - 1, col).*
+                col += 1
+            }
+            row -= 1
+        }
+        // Clear the top row in [left..right]
+        var c = left
+        while (c <= right) {
+            self.getCell(top, c).* = blank.*
+            c += 1
+        }
+    }
+
     /// Insert count blank lines at row, shifting content down within [row..bottom].
     fn insertLines(row: i64, count: i64, bottom: i64, blank: *Cell) void {
         var i: i64 = 0
@@ -508,6 +547,8 @@ struct TerminalState {
     palette: List(i64),
     scroll_top: i64,
     scroll_bottom: i64,
+    scroll_left: i64,
+    scroll_right: i64,
     pty_fd: i64,
     child_pid: i64,
     sel_active: bool,
@@ -681,6 +722,8 @@ struct TerminalState {
             palette: buildFullPalette(THEME_PALETTE),
             scroll_top: 0,
             scroll_bottom: rows - 1,
+            scroll_left: 0,
+            scroll_right: cols - 1,
             pty_fd: -1,
             child_pid: -1,
             sel_active: false,
@@ -952,14 +995,23 @@ struct TerminalState {
             return
         }
 
+        // Compute effective right limit for wrapping
+        var right_limit = self.grid.cols - 1
+        if (self.hasLeftRightMargins() and self.cursor_col >= self.scroll_left and self.cursor_col <= self.scroll_right) {
+            right_limit = self.scroll_right
+        }
+        var wrap_col = self.scroll_left
+        if (!self.hasLeftRightMargins()) {
+            wrap_col = 0
+        }
+
         if (self.pending_wrap) {
             if (self.mode_wraparound) {
                 self.grid.setRowWrap(self.cursor_row, 1)
-                self.cursor_col = 0
+                self.cursor_col = wrap_col
                 self.cursor_row += 1
                 if (self.cursor_row > self.scroll_bottom) {
-                    var blank = self.blankCell()
-                    self.gridScrollUp(self.scroll_top, self.scroll_bottom, &blank)
+                    self.scrollUpInRegion()
                     self.cursor_row = self.scroll_bottom
                 }
                 self.pending_wrap = false
@@ -969,9 +1021,9 @@ struct TerminalState {
             }
         }
 
-        // Wide char at last column: can't fit both cells.
+        // Wide char at right margin: can't fit both cells.
         // Clear the last column and wrap to next line first.
-        if (width == 2 and self.cursor_col >= self.grid.cols - 1) {
+        if (width == 2 and self.cursor_col >= right_limit) {
             // Clear last column
             self.clearWidePartner(self.cursor_row, self.cursor_col)
             const last = self.grid.getCell(self.cursor_row, self.cursor_col)
@@ -984,11 +1036,10 @@ struct TerminalState {
             // Wrap
             if (self.mode_wraparound) {
                 self.grid.setRowWrap(self.cursor_row, 1)
-                self.cursor_col = 0
+                self.cursor_col = wrap_col
                 self.cursor_row += 1
                 if (self.cursor_row > self.scroll_bottom) {
-                    var blank = self.blankCell()
-                    self.gridScrollUp(self.scroll_top, self.scroll_bottom, &blank)
+                    self.scrollUpInRegion()
                     self.cursor_row = self.scroll_bottom
                 }
             }
@@ -1054,14 +1105,14 @@ struct TerminalState {
 
         // Advance cursor: wide chars advance by 2
         if (width == 2) {
-            if (self.cursor_col + 1 >= self.grid.cols - 1) {
-                self.cursor_col = self.grid.cols - 1
+            if (self.cursor_col + 1 >= right_limit) {
+                self.cursor_col = right_limit
                 self.pending_wrap = true
             } else {
                 self.cursor_col += 2
             }
         } else {
-            if (self.cursor_col >= self.grid.cols - 1) {
+            if (self.cursor_col >= right_limit) {
                 self.pending_wrap = true
             } else {
                 self.cursor_col += 1
@@ -1073,24 +1124,24 @@ struct TerminalState {
 
     /// Linefeed (LF): move cursor down one row, scroll if at bottom of region.
     /// In LNM mode (ANSI mode 20), LF also performs carriage return.
+    /// Uses index_() for margin-aware scrolling, then carriageReturn() for LNM.
     fn newline() void {
         self.grid.setRowWrap(self.cursor_row, 0)
-        self.pending_wrap = false
+        self.index_()
         if (self.mode_linefeed_newline) {
-            self.cursor_col = 0
-        }
-        self.cursor_row += 1
-        if (self.cursor_row > self.scroll_bottom) {
-            var blank = self.blankCell()
-            self.gridScrollUp(self.scroll_top, self.scroll_bottom, &blank)
-            self.cursor_row = self.scroll_bottom
+            self.carriageReturn()
         }
     }
 
-    /// Carriage return (CR): move cursor to column 0.
+    /// Carriage return (CR): move cursor to column 0, or scroll_left if within margins.
+    /// Ghostty ref: if origin mode and col >= left margin, go to left margin.
     fn carriageReturn() void {
         self.pending_wrap = false
-        self.cursor_col = 0
+        if (self.cursor_col >= self.scroll_left and self.cursor_col <= self.scroll_right) {
+            self.cursor_col = self.scroll_left
+        } else {
+            self.cursor_col = 0
+        }
     }
 
     /// Backspace (BS): move cursor left by one column.
@@ -1136,10 +1187,15 @@ struct TerminalState {
     }
 
     /// Move forward count tab stops (CHT).
+    /// Stops at scroll_right when cursor is within horizontal margins.
     fn tabForward(count: i64) void {
+        var right_limit = self.grid.cols - 1
+        if (self.hasLeftRightMargins() and self.cursor_col >= self.scroll_left and self.cursor_col <= self.scroll_right) {
+            right_limit = self.scroll_right
+        }
         var remaining = count
         var col = self.cursor_col + 1
-        while (col < self.grid.cols and remaining > 0) {
+        while (col <= right_limit and remaining > 0) {
             if (col < self.tabstops.count) {
                 if (@intToPtr(*i64, self.tabstops.items + col * @sizeOf(i64)).* == 1) {
                     remaining -= 1
@@ -1151,14 +1207,19 @@ struct TerminalState {
             }
             col += 1
         }
-        self.cursor_col = self.grid.cols - 1
+        self.cursor_col = right_limit
     }
 
     /// Move backward count tab stops (CBT).
+    /// Stops at scroll_left when cursor is within horizontal margins in origin mode.
     fn tabBackward(count: i64) void {
+        var left_limit: i64 = 0
+        if (self.mode_origin and self.hasLeftRightMargins() and self.cursor_col >= self.scroll_left and self.cursor_col <= self.scroll_right) {
+            left_limit = self.scroll_left
+        }
         var remaining = count
         var col = self.cursor_col - 1
-        while (col >= 0 and remaining > 0) {
+        while (col >= left_limit and remaining > 0) {
             if (col < self.tabstops.count) {
                 if (@intToPtr(*i64, self.tabstops.items + col * @sizeOf(i64)).* == 1) {
                     remaining -= 1
@@ -1170,7 +1231,7 @@ struct TerminalState {
             }
             col -= 1
         }
-        self.cursor_col = 0
+        self.cursor_col = left_limit
     }
 
     /// Reset tabstops to default (every 8 columns).
@@ -1198,12 +1259,17 @@ struct TerminalState {
         }
     }
 
-    /// Move cursor right by count columns, clamped to last column (CSI C).
+    /// Move cursor right by count columns (CSI C).
+    /// Clamped to scroll_right when cursor starts within horizontal margins.
     fn cursorRight(count: i64) void {
         self.pending_wrap = false
         self.cursor_col += count
-        if (self.cursor_col >= self.grid.cols) {
-            self.cursor_col = self.grid.cols - 1
+        var right_limit = self.grid.cols - 1
+        if (self.hasLeftRightMargins() and self.cursor_col - count >= self.scroll_left and self.cursor_col - count <= self.scroll_right) {
+            right_limit = self.scroll_right
+        }
+        if (self.cursor_col > right_limit) {
+            self.cursor_col = right_limit
         }
     }
 
@@ -1217,15 +1283,17 @@ struct TerminalState {
     }
 
     /// Set absolute cursor position (0-indexed), clamped to grid bounds (CSI H).
-    /// In origin mode, row is offset by scroll_top and clamped to scroll region.
+    /// In origin mode, row is offset by scroll_top and col by scroll_left,
+    /// clamped to scroll region boundaries.
     fn setCursorPos(row: i64, col: i64) void {
         self.pending_wrap = false
         if (self.mode_origin) {
             self.cursor_row = @max(self.scroll_top, @min(row + self.scroll_top, self.scroll_bottom))
+            self.cursor_col = @max(self.scroll_left, @min(col + self.scroll_left, self.scroll_right))
         } else {
             self.cursor_row = @max(0, @min(row, self.grid.rows - 1))
+            self.cursor_col = @max(0, @min(col, self.grid.cols - 1))
         }
-        self.cursor_col = @max(0, @min(col, self.grid.cols - 1))
     }
 
     // -- Scroll region (CSI r) ----------------------------------------------
@@ -1241,6 +1309,51 @@ struct TerminalState {
         self.scroll_top = t
         self.scroll_bottom = b
         self.setCursorPos(0, 0)
+    }
+
+    /// Set left and right margins (DECSLRM).
+    /// Params are 1-indexed CSI convention; 0 means default (left=1, right=cols).
+    /// Gated by mode 69 (DECLRMM) — no-op if disabled.
+    fn setLeftAndRightMargin(left_req: i64, right_req: i64) void {
+        if (!self.mode_left_right_margin) { return }
+        var left = left_req
+        var right = right_req
+        if (left == 0) { left = 1 }
+        if (right == 0) { right = self.grid.cols }
+        if (left >= right) { return }
+        if (left < 1) { left = 1 }
+        if (right > self.grid.cols) { right = self.grid.cols }
+        self.scroll_left = left - 1
+        self.scroll_right = right - 1
+        // Home cursor per Ghostty: setCursorPos(1,1) applies origin mode offset
+        self.setCursorPos(0, 0)
+    }
+
+    /// Check if left/right margins are narrower than the full screen width.
+    fn hasLeftRightMargins() bool {
+        return self.scroll_left > 0 or self.scroll_right < self.grid.cols - 1
+    }
+
+    /// Scroll the scroll region up by one line, respecting left/right margins.
+    fn scrollUpInRegion() void {
+        var blank = self.blankCell()
+        if (self.hasLeftRightMargins()) {
+            self.grid.scrollUpColumns(self.scroll_top, self.scroll_bottom,
+                                      self.scroll_left, self.scroll_right, &blank)
+        } else {
+            self.gridScrollUp(self.scroll_top, self.scroll_bottom, &blank)
+        }
+    }
+
+    /// Scroll the scroll region down by one line, respecting left/right margins.
+    fn scrollDownInRegion() void {
+        var blank = self.blankCell()
+        if (self.hasLeftRightMargins()) {
+            self.grid.scrollDownColumns(self.scroll_top, self.scroll_bottom,
+                                        self.scroll_left, self.scroll_right, &blank)
+        } else {
+            self.grid.scrollDown(self.scroll_top, self.scroll_bottom, &blank)
+        }
     }
 
     // -- Erase operations (CSI J/K) -----------------------------------------
@@ -1344,42 +1457,52 @@ struct TerminalState {
     // -- Index / scroll (IND, RI) -------------------------------------------
 
     /// Index: move cursor down, scroll up if at bottom of scroll region.
+    /// Ghostty: only scroll if cursor is within both vertical and horizontal margins.
     fn index_() void {
         self.pending_wrap = false
         if (self.cursor_row == self.scroll_bottom) {
-            var blank = self.blankCell()
-            self.gridScrollUp(self.scroll_top, self.scroll_bottom, &blank)
+            // Only scroll if cursor is within horizontal margins (or no LR margins set)
+            if (!self.hasLeftRightMargins() or (self.cursor_col >= self.scroll_left and self.cursor_col <= self.scroll_right)) {
+                self.scrollUpInRegion()
+            }
         } else if (self.cursor_row < self.grid.rows - 1) {
             self.cursor_row += 1
         }
     }
 
     /// Reverse index: move cursor up, scroll down if at top of scroll region.
+    /// Ghostty: only scroll if cursor is within both vertical and horizontal margins.
     fn reverseIndex() void {
         self.pending_wrap = false
         if (self.cursor_row == self.scroll_top) {
-            var blank = self.blankCell()
-            self.grid.scrollDown(self.scroll_top, self.scroll_bottom, &blank)
+            if (!self.hasLeftRightMargins() or (self.cursor_col >= self.scroll_left and self.cursor_col <= self.scroll_right)) {
+                self.scrollDownInRegion()
+            }
         } else if (self.cursor_row > 0) {
             self.cursor_row -= 1
         }
     }
 
-    /// Back Index (DECBI): if cursor at col 0, shift scroll region right
-    /// and blank col 0; otherwise move cursor left.
+    /// Back Index (DECBI): if cursor at left margin, shift scroll region right
+    /// within [scroll_left..scroll_right] and blank left col; otherwise move cursor left.
     fn backIndex() void {
         self.pending_wrap = false
-        if (self.cursor_col == 0) {
+        var left_bound: i64 = 0
+        var right_bound = self.grid.cols - 1
+        if (self.hasLeftRightMargins()) {
+            left_bound = self.scroll_left
+            right_bound = self.scroll_right
+        }
+        if (self.cursor_col == left_bound) {
             const blank = self.blankCell()
-            // Shift all cells in each row of the scroll region right by one
             var row = self.scroll_top
             while (row <= self.scroll_bottom) {
-                var col = self.grid.cols - 1
-                while (col > 0) {
+                var col = right_bound
+                while (col > left_bound) {
                     self.grid.getCell(row, col).* = self.grid.getCell(row, col - 1).*
                     col -= 1
                 }
-                self.grid.getCell(row, 0).* = blank
+                self.grid.getCell(row, left_bound).* = blank
                 row += 1
             }
         } else {
@@ -1388,20 +1511,25 @@ struct TerminalState {
     }
 
     /// Forward Index (DECFI): if cursor at right margin, shift scroll region left
-    /// and blank last col; otherwise move cursor right.
+    /// within [scroll_left..scroll_right] and blank right col; otherwise move cursor right.
     fn forwardIndex() void {
         self.pending_wrap = false
-        if (self.cursor_col >= self.grid.cols - 1) {
+        var left_bound: i64 = 0
+        var right_bound = self.grid.cols - 1
+        if (self.hasLeftRightMargins()) {
+            left_bound = self.scroll_left
+            right_bound = self.scroll_right
+        }
+        if (self.cursor_col >= right_bound) {
             const blank = self.blankCell()
-            // Shift all cells in each row of the scroll region left by one
             var row = self.scroll_top
             while (row <= self.scroll_bottom) {
-                var col: i64 = 0
-                while (col < self.grid.cols - 1) {
+                var col = left_bound
+                while (col < right_bound) {
                     self.grid.getCell(row, col).* = self.grid.getCell(row, col + 1).*
                     col += 1
                 }
-                self.grid.getCell(row, self.grid.cols - 1).* = blank
+                self.grid.getCell(row, right_bound).* = blank
                 row += 1
             }
         } else {
@@ -1412,15 +1540,20 @@ struct TerminalState {
     // -- Insert / delete (CSI @, CSI P) -------------------------------------
 
     /// Insert count blank cells at cursor, shifting existing cells right (CSI @).
-    /// Uses current SGR background for new cells.
+    /// Uses current SGR background for new cells. Respects left/right margins.
     fn insertBlanks(count: i64) void {
         self.pending_wrap = false
         const row = self.cursor_row
         const col = self.cursor_col
-        const n = @min(count, self.grid.cols - col)
+        // Determine right boundary
+        var right_boundary = self.grid.cols - 1
+        if (self.hasLeftRightMargins() and col >= self.scroll_left and col <= self.scroll_right) {
+            right_boundary = self.scroll_right
+        }
+        const n = @min(count, right_boundary - col + 1)
 
-        // Shift cells right (iterate right-to-left to handle overlap)
-        var c = self.grid.cols - 1
+        // Shift cells right within [col..right_boundary] (iterate right-to-left)
+        var c = right_boundary
         while (c >= col + n) {
             self.grid.getCell(row, c).* = self.grid.getCell(row, c - n).*
             c -= 1
@@ -1434,45 +1567,86 @@ struct TerminalState {
     }
 
     /// Delete count cells at cursor, shifting remaining cells left (CSI P).
-    /// Uses current SGR background for vacated cells.
+    /// Uses current SGR background for vacated cells. Respects left/right margins.
     fn deleteChars(count: i64) void {
         self.pending_wrap = false
         const row = self.cursor_row
         const col = self.cursor_col
-        const n = @min(count, self.grid.cols - col)
+        // Determine right boundary
+        var right_boundary = self.grid.cols - 1
+        if (self.hasLeftRightMargins() and col >= self.scroll_left and col <= self.scroll_right) {
+            right_boundary = self.scroll_right
+        }
+        const n = @min(count, right_boundary - col + 1)
 
-        // Shift cells left (iterate left-to-right to handle overlap)
+        // Shift cells left within [col..right_boundary] (iterate left-to-right)
         var c = col
-        while (c < self.grid.cols - n) {
+        while (c <= right_boundary - n) {
             self.grid.getCell(row, c).* = self.grid.getCell(row, c + n).*
             c += 1
         }
 
-        // Clear vacated cells at end of line with SGR bg
+        // Clear vacated cells at right end with SGR bg
         const blank = self.blankCell()
-        c = self.grid.cols - n
-        while (c < self.grid.cols) {
+        c = right_boundary - n + 1
+        while (c <= right_boundary) {
             self.grid.getCell(row, c).* = blank
             c += 1
         }
     }
 
     /// Insert count blank lines at cursor row (CSI L).
-    /// Uses current SGR background. Cursor moves to column 0 per Ghostty.
+    /// Uses current SGR background. Cursor moves to scroll_left (or 0 without margins).
+    /// No-op if cursor is outside horizontal margins.
     fn handleInsertLines(count: i64) void {
         self.pending_wrap = false
+        // Reject if cursor is outside horizontal margins
+        if (self.hasLeftRightMargins()) {
+            if (self.cursor_col < self.scroll_left or self.cursor_col > self.scroll_right) { return }
+        }
         var blank = self.blankCell()
-        self.grid.insertLines(self.cursor_row, count, self.scroll_bottom, &blank)
-        self.cursor_col = 0
+        if (self.hasLeftRightMargins()) {
+            var i: i64 = 0
+            while (i < count) {
+                self.grid.scrollDownColumns(self.cursor_row, self.scroll_bottom,
+                                            self.scroll_left, self.scroll_right, &blank)
+                i += 1
+            }
+        } else {
+            self.grid.insertLines(self.cursor_row, count, self.scroll_bottom, &blank)
+        }
+        if (self.hasLeftRightMargins()) {
+            self.cursor_col = self.scroll_left
+        } else {
+            self.cursor_col = 0
+        }
     }
 
     /// Delete count lines at cursor row (CSI M).
-    /// Uses current SGR background. Cursor moves to column 0 per Ghostty.
+    /// Uses current SGR background. Cursor moves to scroll_left (or 0 without margins).
+    /// No-op if cursor is outside horizontal margins.
     fn handleDeleteLines(count: i64) void {
         self.pending_wrap = false
+        // Reject if cursor is outside horizontal margins
+        if (self.hasLeftRightMargins()) {
+            if (self.cursor_col < self.scroll_left or self.cursor_col > self.scroll_right) { return }
+        }
         var blank = self.blankCell()
-        self.grid.deleteLines(self.cursor_row, count, self.scroll_bottom, &blank)
-        self.cursor_col = 0
+        if (self.hasLeftRightMargins()) {
+            var i: i64 = 0
+            while (i < count) {
+                self.grid.scrollUpColumns(self.cursor_row, self.scroll_bottom,
+                                          self.scroll_left, self.scroll_right, &blank)
+                i += 1
+            }
+        } else {
+            self.grid.deleteLines(self.cursor_row, count, self.scroll_bottom, &blank)
+        }
+        if (self.hasLeftRightMargins()) {
+            self.cursor_col = self.scroll_left
+        } else {
+            self.cursor_col = 0
+        }
     }
 
     /// Erase N characters at cursor position without moving cursor (ECH).
@@ -1648,6 +1822,8 @@ struct TerminalState {
         self.single_shift = 0
         self.scroll_top = 0
         self.scroll_bottom = self.grid.rows - 1
+        self.scroll_left = 0
+        self.scroll_right = self.grid.cols - 1
         self.charset_g0 = 0
         self.charset_g1 = 0
         self.charset_g2 = 0
@@ -1839,10 +2015,18 @@ struct TerminalState {
                 self.setCursorPos(0, 0)
                 self.scroll_top = 0
                 self.scroll_bottom = self.grid.rows - 1
+                self.scroll_left = 0
+                self.scroll_right = self.grid.cols - 1
             },
             66 => { self.mode_app_keypad = enable },
             67 => { self.mode_backspace_sends_bs = enable },
-            69 => { self.mode_left_right_margin = enable },
+            69 => {
+                self.mode_left_right_margin = enable
+                if (!enable) {
+                    self.scroll_left = 0
+                    self.scroll_right = self.grid.cols - 1
+                }
+            },
             80 => { self.mode_sixel_scrolling = enable },
             2027 => { self.mode_grapheme_cluster = enable },
             2031 => { self.mode_report_color_scheme = enable },
@@ -2006,6 +2190,8 @@ struct TerminalState {
         self.cursor_col = 0
         self.scroll_top = 0
         self.scroll_bottom = self.grid.rows - 1
+        self.scroll_left = 0
+        self.scroll_right = self.grid.cols - 1
         self.pending_wrap = false
         self.mode_alt_screen = true
         self.sel_active = false
@@ -2047,6 +2233,8 @@ struct TerminalState {
         self.saved_active_charset = self.alt_saved_active_charset
         self.scroll_top = 0
         self.scroll_bottom = self.grid.rows - 1
+        self.scroll_left = 0
+        self.scroll_right = self.grid.cols - 1
         self.pending_wrap = false
         self.mode_alt_screen = false
         self.alt_grid = TerminalGrid.init(0, 0)
@@ -2204,19 +2392,64 @@ struct TerminalState {
 
     // -- Resize -------------------------------------------------------------
 
-    /// Resize rows only (no column change), preserving content and wrap flags.
-    /// Discards scrollback (active_start resets to 0 in new grid).
+    /// Resize rows only (no column change), preserving scrollback and active content.
     fn resizeRowsOnly(new_rows: i64) void {
-        var new_grid = TerminalGrid.init(new_rows, self.grid.cols)
-        const copy_rows = @min(self.grid.rows, new_rows)
+        const old_scrollback = self.grid.active_start
+        const cols = self.grid.cols
 
+        // New grid starts with new_rows active rows (active_start = 0)
+        var new_grid = TerminalGrid.init(new_rows, cols)
+
+        // Pre-extend cells/wraps/semantics to hold scrollback + active
+        // TerminalGrid.init already created new_rows worth of cells.
+        // We need to shift those to make room for scrollback at the front.
+        if (old_scrollback > 0) {
+            // Append scrollback-many rows of blank cells to extend the lists
+            for i in 0..(old_scrollback * cols) {
+                new_grid.cells.append(Cell.init())
+            }
+            for i in 0..old_scrollback {
+                new_grid.row_wrap.append(0)
+                new_grid.row_semantic.append(0)
+            }
+
+            // Move the active area cells to after the scrollback area.
+            // Shift existing cells (which are at indices 0..new_rows*cols)
+            // to indices old_scrollback*cols..(old_scrollback+new_rows)*cols.
+            // Work backwards to avoid overwriting.
+            var r = new_rows - 1
+            while (r >= 0) {
+                const dst = new_grid.cells.items + ((old_scrollback + r) * cols) * @sizeOf(Cell)
+                const src = new_grid.cells.items + (r * cols) * @sizeOf(Cell)
+                memcpy(dst, src, cols * @sizeOf(Cell))
+                // Also shift wrap/semantic
+                @intToPtr(*i64, new_grid.row_wrap.items + (old_scrollback + r) * @sizeOf(i64)).* = @intToPtr(*i64, new_grid.row_wrap.items + r * @sizeOf(i64)).*
+                @intToPtr(*i64, new_grid.row_semantic.items + (old_scrollback + r) * @sizeOf(i64)).* = @intToPtr(*i64, new_grid.row_semantic.items + r * @sizeOf(i64)).*
+                r -= 1
+            }
+            new_grid.active_start = old_scrollback
+        }
+
+        // Copy scrollback rows (absolute rows 0..active_start)
+        var sb: i64 = 0
+        while (sb < old_scrollback) {
+            const dst = new_grid.cells.items + (sb * cols) * @sizeOf(Cell)
+            const src = self.grid.cells.items + (sb * cols) * @sizeOf(Cell)
+            memcpy(dst, src, cols * @sizeOf(Cell))
+            @intToPtr(*i64, new_grid.row_wrap.items + sb * @sizeOf(i64)).* = self.grid.getRowWrapAbs(sb)
+            @intToPtr(*i64, new_grid.row_semantic.items + sb * @sizeOf(i64)).* = @intToPtr(*i64, self.grid.row_semantic.items + sb * @sizeOf(i64)).*
+            sb += 1
+        }
+
+        // Copy active rows (relative, up to min of old/new rows)
+        const copy_rows = @min(self.grid.rows, new_rows)
         var row: i64 = 0
         while (row < copy_rows) {
-            const dst = new_grid.cells.items + (row * self.grid.cols) * @sizeOf(Cell)
-            const src = self.grid.cells.items + ((self.grid.active_start + row) * self.grid.cols) * @sizeOf(Cell)
-            memcpy(dst, src, self.grid.cols * @sizeOf(Cell))
-            new_grid.setRowWrap(row, self.grid.getRowWrap(row))
-            new_grid.setRowSemantic(row, self.grid.getRowSemantic(row))
+            const dst = new_grid.cells.items + ((old_scrollback + row) * cols) * @sizeOf(Cell)
+            const src = self.grid.cells.items + ((old_scrollback + row) * cols) * @sizeOf(Cell)
+            memcpy(dst, src, cols * @sizeOf(Cell))
+            @intToPtr(*i64, new_grid.row_wrap.items + (old_scrollback + row) * @sizeOf(i64)).* = self.grid.getRowWrapAbs(old_scrollback + row)
+            @intToPtr(*i64, new_grid.row_semantic.items + (old_scrollback + row) * @sizeOf(i64)).* = @intToPtr(*i64, self.grid.row_semantic.items + (old_scrollback + row) * @sizeOf(i64)).*
             row += 1
         }
 
@@ -2224,6 +2457,8 @@ struct TerminalState {
         self.viewport_row = -1
         self.scroll_top = 0
         self.scroll_bottom = new_rows - 1
+        self.scroll_left = 0
+        self.scroll_right = self.grid.cols - 1
         self.cursor_row = @min(self.cursor_row, new_rows - 1)
         self.pending_wrap = false
         self.tabstops = initTabstops(self.grid.cols)
@@ -2248,6 +2483,8 @@ struct TerminalState {
             if (self.cursor_col >= new_cols) { self.cursor_col = new_cols - 1 }
             self.scroll_top = 0
             self.scroll_bottom = new_rows - 1
+            self.scroll_left = 0
+            self.scroll_right = new_cols - 1
             self.pending_wrap = false
             self.tabstops = initTabstops(new_cols)
             return
@@ -2271,12 +2508,19 @@ struct TerminalState {
         var new_cursor_row: i64 = 0
         var new_cursor_col: i64 = 0
 
+        // Total source rows = scrollback + active. Use absolute row indices.
+        const old_scrollback = self.grid.active_start
+        const total_src_rows = old_scrollback + self.grid.rows
+        // Cursor absolute row in the old grid
+        const cursor_abs_row = old_scrollback + self.cursor_row
+
         // Process each logical line (sequence of soft-wrapped rows)
+        // Iterate ALL rows: scrollback (0..active_start) + active (active_start..total)
         var src_row: i64 = 0
-        while (src_row < self.grid.rows) {
+        while (src_row < total_src_rows) {
             // Find extent of this logical line
             var line_start = src_row
-            while (src_row < self.grid.rows - 1 and self.grid.getRowWrap(src_row) == 1) {
+            while (src_row < total_src_rows - 1 and self.grid.getRowWrapAbs(src_row) == 1) {
                 src_row += 1
             }
             var line_end = src_row
@@ -2291,18 +2535,18 @@ struct TerminalState {
                 var idx = content_len - 1
                 var r = line_start + idx / self.grid.cols
                 var c = idx % self.grid.cols
-                var cell = self.grid.getCell(r, c)
+                var cell = self.grid.getCellAbs(r, c)
                 if (cell.codepoint != 0 and cell.codepoint != ' ') {
                     break
                 }
                 content_len -= 1
             }
 
-            // Check if cursor is in this logical line
-            var cursor_in_line = (self.cursor_row >= line_start and self.cursor_row <= line_end)
+            // Check if cursor is in this logical line (using absolute row)
+            var cursor_in_line = (cursor_abs_row >= line_start and cursor_abs_row <= line_end)
             var cursor_abs: i64 = 0
             if (cursor_in_line) {
-                cursor_abs = (self.cursor_row - line_start) * self.grid.cols + self.cursor_col
+                cursor_abs = (cursor_abs_row - line_start) * self.grid.cols + self.cursor_col
             }
 
             // Number of output rows for this logical line
@@ -2322,7 +2566,7 @@ struct TerminalState {
                     if (abs_idx < total_cells) {
                         var r = line_start + abs_idx / self.grid.cols
                         var c = abs_idx % self.grid.cols
-                        out_cells.append(self.grid.getCell(r, c).*)
+                        out_cells.append(self.grid.getCellAbs(r, c).*)
                     } else {
                         out_cells.append(Cell.init())
                     }
@@ -2335,7 +2579,7 @@ struct TerminalState {
                     out_wraps.append(0)
                 }
                 // Semantic from first row of logical line propagates
-                out_semantics.append(self.grid.getRowSemantic(line_start))
+                out_semantics.append(@intToPtr(*i64, self.grid.row_semantic.items + line_start * @sizeOf(i64)).*)
 
                 out_rows += 1
                 row_idx += 1
@@ -2359,34 +2603,56 @@ struct TerminalState {
             }
         }
 
-        // Build new grid, keeping cursor visible at bottom of view
+        // Build new grid. Excess rows above the active area become scrollback.
         var new_grid = TerminalGrid.init(new_rows, new_cols)
+        var new_active_start: i64 = 0
 
-        var skip: i64 = 0
         if (out_rows > new_rows) {
-            skip = new_cursor_row - new_rows + 1
-            if (skip < 0) { skip = 0 }
-            if (skip + new_rows > out_rows) { skip = out_rows - new_rows }
+            // Rows that don't fit in the active area become scrollback.
+            // Keep cursor visible: active area contains cursor row at bottom.
+            new_active_start = new_cursor_row - new_rows + 1
+            if (new_active_start < 0) { new_active_start = 0 }
+            if (new_active_start + new_rows > out_rows) { new_active_start = out_rows - new_rows }
+
+            // Extend the new grid's cells/wraps/semantics for scrollback
+            for i in 0..(new_active_start * new_cols) {
+                new_grid.cells.append(Cell.init())
+            }
+            for i in 0..new_active_start {
+                new_grid.row_wrap.append(0)
+                new_grid.row_semantic.append(0)
+            }
+
+            // Shift active area cells to make room for scrollback at front
+            var r = new_rows - 1
+            while (r >= 0) {
+                const dst = new_grid.cells.items + ((new_active_start + r) * new_cols) * @sizeOf(Cell)
+                const src = new_grid.cells.items + (r * new_cols) * @sizeOf(Cell)
+                memcpy(dst, src, new_cols * @sizeOf(Cell))
+                @intToPtr(*i64, new_grid.row_wrap.items + (new_active_start + r) * @sizeOf(i64)).* = @intToPtr(*i64, new_grid.row_wrap.items + r * @sizeOf(i64)).*
+                @intToPtr(*i64, new_grid.row_semantic.items + (new_active_start + r) * @sizeOf(i64)).* = @intToPtr(*i64, new_grid.row_semantic.items + r * @sizeOf(i64)).*
+                r -= 1
+            }
+            new_grid.active_start = new_active_start
         }
 
-        // Copy output rows into new grid
+        // Copy all output rows into new grid (scrollback + active)
+        var copy_total = @min(out_rows, new_active_start + new_rows)
         var dst_row: i64 = 0
-        var src_idx = skip
-        while (src_idx < out_rows and dst_row < new_rows) {
+        while (dst_row < copy_total) {
             var col: i64 = 0
             while (col < new_cols) {
-                var cell_idx = src_idx * new_cols + col
-                new_grid.getCell(dst_row, col).* = @intToPtr(*Cell, out_cells.items + cell_idx * @sizeOf(Cell)).*
+                var cell_idx = dst_row * new_cols + col
+                new_grid.getCellAbs(dst_row, col).* = @intToPtr(*Cell, out_cells.items + cell_idx * @sizeOf(Cell)).*
                 col += 1
             }
-            new_grid.setRowWrap(dst_row, @intToPtr(*i64, out_wraps.items + src_idx * @sizeOf(i64)).*)
-            new_grid.setRowSemantic(dst_row, @intToPtr(*i64, out_semantics.items + src_idx * @sizeOf(i64)).*)
+            @intToPtr(*i64, new_grid.row_wrap.items + dst_row * @sizeOf(i64)).* = @intToPtr(*i64, out_wraps.items + dst_row * @sizeOf(i64)).*
+            @intToPtr(*i64, new_grid.row_semantic.items + dst_row * @sizeOf(i64)).* = @intToPtr(*i64, out_semantics.items + dst_row * @sizeOf(i64)).*
             dst_row += 1
-            src_idx += 1
         }
 
-        // Adjust cursor for skipped rows
-        new_cursor_row -= skip
+        // Cursor position relative to active area
+        new_cursor_row -= new_active_start
         if (new_cursor_row < 0) { new_cursor_row = 0 }
         if (new_cursor_row >= new_rows) { new_cursor_row = new_rows - 1 }
         if (new_cursor_col >= new_cols) { new_cursor_col = new_cols - 1 }
@@ -2397,6 +2663,8 @@ struct TerminalState {
         self.viewport_row = -1
         self.scroll_top = 0
         self.scroll_bottom = new_rows - 1
+        self.scroll_left = 0
+        self.scroll_right = new_cols - 1
         self.pending_wrap = false
         self.tabstops = initTabstops(new_cols)
         // Selection coordinates are invalidated by reflow
@@ -2954,13 +3222,16 @@ fn keyToTerminalBytes(fd: i64, key: i64, mods: i64, app_cursor: bool) void {
     const has_ctrl = (mods & MOD_CTRL) != 0
     const has_shift = (mods & MOD_SHIFT) != 0
     const has_alt = (mods & MOD_ALT) != 0
-    const has_mods = has_ctrl or has_shift or has_alt
+    const has_super = (mods & MOD_SUPER) != 0
+    const has_mods = has_ctrl or has_shift or has_alt or has_super
 
-    // Compute xterm modifier parameter: 1 + shift?1 + alt?2 + ctrl?4
+    // Compute xterm modifier parameter: 1 + shift?1 + alt?2 + ctrl?4 + super?8
+    // Ghostty ref: function_keys.zig — super is modifier code 9 (1 + 8)
     var mod_param: i64 = 1
     if (has_shift) { mod_param = mod_param + 1 }
     if (has_alt) { mod_param = mod_param + 2 }
     if (has_ctrl) { mod_param = mod_param + 4 }
+    if (has_super) { mod_param = mod_param + 8 }
 
     // Ctrl+key → control character
     // Ghostty ref: key_encode.zig ctrlSeq() — Kitty-compatible mapping
@@ -4169,4 +4440,200 @@ test "kitty key encode F5 with mods" {
     // Ctrl+F5 with disambiguate: CSI 15;5~
     const bytes = captureKittyKey(KEY_F5, MOD_CTRL, 1, 0)
     @assert(capturedEquals(bytes, "\x1b[15;5~"))
+}
+
+// ============================================================================
+// DECSLRM (Left/Right Margin) Tests
+// ============================================================================
+
+test "DECSLRM set and query" {
+    var t = TerminalState.init(10, 20)
+    // Without mode 69, setLeftAndRightMargin is a no-op
+    t.setLeftAndRightMargin(5, 15)
+    @assertEq(t.scroll_left, 0)
+    @assertEq(t.scroll_right, 19)
+    // Enable mode 69, then set margins
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(5, 15)
+    @assertEq(t.scroll_left, 4)   // 1-indexed → 0-indexed
+    @assertEq(t.scroll_right, 14)
+}
+
+test "DECSLRM requires mode 69" {
+    var t = TerminalState.init(10, 20)
+    t.setLeftAndRightMargin(3, 18)
+    @assertEq(t.scroll_left, 0)
+    @assertEq(t.scroll_right, 19)
+    @assert(!t.hasLeftRightMargins())
+}
+
+test "DECSLRM carriage return to left margin" {
+    var t = TerminalState.init(10, 20)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(5, 15)
+    // Cursor within margins
+    t.cursor_col = 10
+    t.carriageReturn()
+    @assertEq(t.cursor_col, 4)  // scroll_left = 4
+    // Cursor outside margins (left of left margin)
+    t.cursor_col = 2
+    t.carriageReturn()
+    @assertEq(t.cursor_col, 0)  // goes to col 0
+}
+
+test "DECSLRM cursor right stops at right margin" {
+    var t = TerminalState.init(10, 20)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(5, 15)
+    // Cursor starts within margins
+    t.cursor_col = 10
+    t.cursorRight(100)
+    @assertEq(t.cursor_col, 14)  // clamped to scroll_right
+}
+
+test "DECSLRM index scrolls within margins" {
+    var t = TerminalState.init(5, 10)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(3, 8)
+    // scroll_left=2, scroll_right=7
+    // Put content in the margin region
+    t.cursor_row = 0
+    t.cursor_col = 2
+    t.grid.getCell(0, 3).codepoint = 'A'
+    t.grid.getCell(1, 3).codepoint = 'B'
+    t.grid.getCell(2, 3).codepoint = 'C'
+    // Put content outside margins (should not move)
+    t.grid.getCell(0, 0).codepoint = 'X'
+    t.grid.getCell(1, 0).codepoint = 'Y'
+    // Move cursor to bottom of scroll region and trigger scroll
+    t.cursor_row = 4  // scroll_bottom = 4
+    t.cursor_col = 3  // within margins
+    t.index_()
+    // Row 0 col 3 should now have 'B' (shifted up within margins)
+    @assertEq(t.grid.getCell(0, 3).codepoint, 'B')
+    // Content outside margins should be untouched
+    @assertEq(t.grid.getCell(0, 0).codepoint, 'X')
+    @assertEq(t.grid.getCell(1, 0).codepoint, 'Y')
+}
+
+test "DECSLRM insert lines within margins" {
+    var t = TerminalState.init(5, 10)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(3, 8)
+    // scroll_left=2, scroll_right=7
+    t.grid.getCell(1, 3).codepoint = 'A'
+    t.grid.getCell(1, 0).codepoint = 'X'
+    t.cursor_row = 1
+    t.cursor_col = 3
+    t.handleInsertLines(1)
+    // 'A' should have shifted down within margins
+    @assertEq(t.grid.getCell(2, 3).codepoint, 'A')
+    // Row 1 col 3 should be blank now
+    @assertEq(t.grid.getCell(1, 3).codepoint, 0)
+    // Content outside margins should be untouched
+    @assertEq(t.grid.getCell(1, 0).codepoint, 'X')
+    // Cursor should be at scroll_left
+    @assertEq(t.cursor_col, 2)
+}
+
+test "DECSLRM insert delete chars within margins" {
+    var t = TerminalState.init(5, 10)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(3, 8)
+    // scroll_left=2, scroll_right=7
+    // Fill cells 2-7 with letters
+    t.grid.getCell(0, 2).codepoint = 'A'
+    t.grid.getCell(0, 3).codepoint = 'B'
+    t.grid.getCell(0, 4).codepoint = 'C'
+    t.grid.getCell(0, 5).codepoint = 'D'
+    t.grid.getCell(0, 6).codepoint = 'E'
+    t.grid.getCell(0, 7).codepoint = 'F'
+    // Insert 2 blanks at col 3
+    t.cursor_row = 0
+    t.cursor_col = 3
+    t.insertBlanks(2)
+    // Col 3,4 should be blank; col 5 should be 'B'
+    @assertEq(t.grid.getCell(0, 3).codepoint, 0)
+    @assertEq(t.grid.getCell(0, 4).codepoint, 0)
+    @assertEq(t.grid.getCell(0, 5).codepoint, 'B')
+    // Col 2 (at left boundary) should still be 'A'
+    @assertEq(t.grid.getCell(0, 2).codepoint, 'A')
+    // 'E' and 'F' should have been pushed off the right margin
+    @assertEq(t.grid.getCell(0, 7).codepoint, 'D')
+}
+
+test "DECSLRM putChar wraps within margins" {
+    var t = TerminalState.init(5, 10)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(3, 6)
+    // scroll_left=2, scroll_right=5
+    // Place cursor at right margin
+    t.cursor_row = 0
+    t.cursor_col = 5
+    t.putChar('Z')
+    // Should have pending_wrap set
+    @assert(t.pending_wrap)
+    // Write another char to trigger wrap
+    t.putChar('W')
+    // Should wrap to scroll_left on next row
+    @assertEq(t.cursor_row, 1)
+    @assertEq(t.cursor_col, 3)  // scroll_left + 1 (advanced after write)
+    @assertEq(t.grid.getCell(1, 2).codepoint, 'W')
+}
+
+test "DECSLRM reset on mode 69 disable" {
+    var t = TerminalState.init(10, 20)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(5, 15)
+    @assertEq(t.scroll_left, 4)
+    @assertEq(t.scroll_right, 14)
+    // Disable mode 69
+    t.setDecMode(69, false)
+    @assertEq(t.scroll_left, 0)
+    @assertEq(t.scroll_right, 19)
+    @assert(!t.hasLeftRightMargins())
+}
+
+test "DECSLRM reset on resize" {
+    var t = TerminalState.init(10, 20)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(5, 15)
+    @assertEq(t.scroll_left, 4)
+    t.resize(10, 30)
+    @assertEq(t.scroll_left, 0)
+    @assertEq(t.scroll_right, 29)
+}
+
+test "DECSLRM reverse index scrolls within margins" {
+    var t = TerminalState.init(5, 10)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(3, 8)
+    // scroll_left=2, scroll_right=7
+    t.grid.getCell(0, 3).codepoint = 'A'
+    t.grid.getCell(0, 0).codepoint = 'X'
+    // Cursor at top of scroll region, within horizontal margins
+    t.cursor_row = 0
+    t.cursor_col = 3
+    t.reverseIndex()
+    // 'A' should have shifted down within margins
+    @assertEq(t.grid.getCell(1, 3).codepoint, 'A')
+    // Row 0 col 3 should be blank
+    @assertEq(t.grid.getCell(0, 3).codepoint, 0)
+    // Content outside margins untouched
+    @assertEq(t.grid.getCell(0, 0).codepoint, 'X')
+}
+
+test "DECSLRM setCursorPos origin mode offsets by scroll_left" {
+    var t = TerminalState.init(10, 20)
+    t.mode_left_right_margin = true
+    t.setLeftAndRightMargin(5, 15)
+    t.mode_origin = true
+    // setCursorPos(0, 0) should go to (scroll_top, scroll_left)
+    t.setCursorPos(0, 0)
+    @assertEq(t.cursor_row, 0)
+    @assertEq(t.cursor_col, 4)  // scroll_left
+    // setCursorPos(2, 3) should offset
+    t.setCursorPos(2, 3)
+    @assertEq(t.cursor_row, 2)
+    @assertEq(t.cursor_col, 7)  // 3 + 4
 }

@@ -1365,6 +1365,23 @@ export fn cotty_workspace_focused_surface(ws: i64) i64 {
     return tree.getNode(focused).surface_handle
 }
 
+/// Set the focused surface by handle. Returns 1 if found, 0 otherwise.
+export fn cotty_workspace_set_focused_surface(ws: i64, surface_handle: i64) i64 {
+    const wptr = getWorkspacePtr(ws)
+    if (wptr.selected_index < 0 or wptr.selected_index >= wptr.tabs.count) { return 0 }
+    const tree = currentSplitTreeForWs(wptr)
+    var i: i64 = 0
+    while (i < tree.nodes.count) {
+        const node = tree.getNode(i)
+        if (node.is_leaf and node.surface_handle == surface_handle) {
+            tree.focused = i
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
 // ---- Split tree queries (for Swift layout) ----
 
 /// Return the split tree node count for the current tab.
