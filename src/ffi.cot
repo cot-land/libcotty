@@ -423,9 +423,15 @@ export fn cotty_terminal_unlock(surface: i64) void {
     getSurfacePtr(surface).terminal_mutex.unlock()
 }
 
-/// Return the notification pipe read fd. Main thread monitors this for render signals.
+/// Return the notification pipe read fd. Main thread monitors this for non-render signals.
 export fn cotty_terminal_notify_fd(surface: i64) i64 {
     return getSurfacePtr(surface).notify_pipe_read
+}
+
+/// Check and clear the atomic render dirty flag. Returns 1 if dirty, 0 if clean.
+/// Called by Swift VSync callback (CADisplayLink) to decide whether to render.
+export fn cotty_terminal_check_dirty(surface: i64) i64 {
+    return getSurfacePtr(surface).checkAndClearDirty()
 }
 
 // ============================================================================

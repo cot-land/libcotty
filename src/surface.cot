@@ -47,7 +47,9 @@ fn ioReaderMain(arg: i64) void {
             surface.parser.feed(surface.terminal, b)
         }
         surface.terminal_mutex.unlock()
-        // Notify main thread — content doesn't matter, just a signal
+        // Set atomic dirty flag for VSync-driven rendering
+        surface.markRenderDirty()
+        // Notify main thread via pipe (for title/bell/child-exit signals)
         fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
     }
 }
@@ -76,6 +78,7 @@ struct Surface {
     io_thread: Thread,
     notify_pipe_read: i64,
     notify_pipe_write: i64,
+    render_dirty: i64,
     inspector: Inspector,
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
@@ -98,6 +101,7 @@ struct Surface {
             io_thread: dummy_thread,
             notify_pipe_read: -1,
             notify_pipe_write: -1,
+            render_dirty: 0,
             inspector: Inspector.init(24, 80),
         }
     }
@@ -124,6 +128,7 @@ struct Surface {
                 io_thread: dummy_thread,
                 notify_pipe_read: -1,
                 notify_pipe_write: -1,
+                render_dirty: 0,
                 inspector: Inspector.init(24, 80),
             }
         }
@@ -142,6 +147,7 @@ struct Surface {
             io_thread: dummy_thread,
             notify_pipe_read: -1,
             notify_pipe_write: -1,
+            render_dirty: 0,
             inspector: Inspector.init(24, 80),
         }
     }
@@ -179,6 +185,7 @@ struct Surface {
             io_thread: dummy_thread,
             notify_pipe_read: pipe_r,
             notify_pipe_write: pipe_w,
+            render_dirty: 0,
             inspector: Inspector.init(rows, cols),
         }
     }
@@ -314,6 +321,17 @@ struct Surface {
     /// Returns true if this surface is a terminal emulator.
     fn isTerminal() bool {
         return self.kind == SurfaceKind.Terminal
+    }
+
+    /// Set the render dirty flag (atomic). Called by IO thread after VT parse batch.
+    fn markRenderDirty() void {
+        @atomicStore(&self.render_dirty, 1)
+    }
+
+    /// Check and clear the render dirty flag (atomic). Called by Swift VSync callback.
+    /// Returns 1 if dirty (needs render), 0 if clean.
+    fn checkAndClearDirty() i64 {
+        return @atomicExchange(&self.render_dirty, 0)
     }
 
     /// Return the title for this surface.
