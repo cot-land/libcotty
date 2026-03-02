@@ -797,6 +797,11 @@ export fn cotty_config_sel_fg_b() i64 {
     return g_app.config.sel_fg_b
 }
 
+/// Return the background opacity (0-100).
+export fn cotty_config_bg_opacity() i64 {
+    return g_app.config.background_opacity
+}
+
 /// Set the font size. Clamped to 6–72.
 export fn cotty_config_set_font_size(size: i64) void {
     var s = size

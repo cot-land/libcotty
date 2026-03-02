@@ -22,6 +22,7 @@ var THEME_BG_B: i64 = 0
 
 var THEME_PALETTE: List(i64) = undefined
 var THEME_SHELL: string = "/bin/zsh"
+var THEME_BG_OPACITY: i64 = 100
 var THEME_READY: i64 = 0
 
 // ============================================================================
@@ -51,6 +52,7 @@ struct Config {
     sel_fg_b: i64,
     palette: List(i64),
     shell_command: string,
+    background_opacity: i64,
 
     /// Create a Config with Monokai Remastered defaults.
     static fn init() Config {
@@ -70,6 +72,7 @@ struct Config {
             sel_fg_r: 255, sel_fg_g: 255, sel_fg_b: 255,
             palette: palette,
             shell_command: "/bin/zsh",
+            background_opacity: 100,
         }
     }
 
@@ -114,6 +117,15 @@ struct Config {
         const shell_val = jsonObjectGet(root, "command")
         if (shell_val != 0 and jsonTag(shell_val) == JSON_STRING) {
             cfg.shell_command = jsonGetString(shell_val)
+        }
+
+        // Background opacity (0-100, default 100 = fully opaque)
+        const opacity_val = jsonObjectGet(root, "background-opacity")
+        if (opacity_val != 0 and jsonTag(opacity_val) == JSON_INT) {
+            var opacity = jsonGetInt(opacity_val)
+            if (opacity < 0) { opacity = 0 }
+            if (opacity > 100) { opacity = 100 }
+            cfg.background_opacity = opacity
         }
 
         // Colors
@@ -415,6 +427,7 @@ fn initThemeDefaults(cfg: *Config) void {
     THEME_BG_B = cfg.bg_b
     THEME_PALETTE = cfg.palette
     THEME_SHELL = cfg.shell_command
+    THEME_BG_OPACITY = cfg.background_opacity
 }
 
 // ============================================================================

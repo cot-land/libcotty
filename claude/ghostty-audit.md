@@ -136,7 +136,8 @@ Conducted 2026-03-02.
 - Fixed: `mouseToTerminalBytes` accepts mods param, adds shift/alt/ctrl bits to button code. Swift passes NSEvent modifiers.
 
 ### 31. No font variants (bold/italic font faces)
-- [ ] GlyphAtlas uses single CTFont. CELL_BOLD/CELL_ITALIC ignored by renderer.
+- [x] GlyphAtlas uses single CTFont. CELL_BOLD/CELL_ITALIC ignored by renderer.
+- Fixed: GlyphAtlas creates bold, italic, bold+italic CTFont variants via CTFontCreateCopyWithSymbolicTraits. lookupStyled() caches styled glyphs with style-encoded keys (bits 30-31). Renderer calls lookupStyled based on CELL_BOLD/CELL_ITALIC flags.
 
 ### 32. CAN (0x18) / SUB (0x1A) don't abort sequences
 - [x] Should cancel in-progress escape sequence and return to ground state.
@@ -162,7 +163,7 @@ Conducted 2026-03-02.
 - [ ] 41. No per-row dirty tracking
 - [x] 42. Mouse-hide-while-typing — `NSCursor.setHiddenUntilMouseMoves(true)` in keyDown
 - [ ] 43. No minimum-contrast
-- [ ] 44. No background-opacity/transparency
+- [x] 44. Background opacity — `background-opacity` config key (0-100), window/Metal layer transparency, clear color alpha
 - [x] 45. F13-F20, numpad keys (KP 0-9, Enter, +, -, *, /, .) — constants, legacy tilde/char encoding, Kitty codepoints, Swift keyCode mapping
 - [x] 46. No bare `CSI u` for xterm restore-cursor — Added SCORC (CSI u) and SCOSC (CSI s) for xterm cursor save/restore
 - [x] 47. ANSI modes 2 (KAM), 12 (SRM) — Added `mode_keyboard_action` and `mode_send_receive` to setAnsiMode

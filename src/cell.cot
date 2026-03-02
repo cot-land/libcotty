@@ -16,6 +16,7 @@ const CELL_HIDDEN: i64 = 256
 const CELL_OVERLINE: i64 = 512
 const CELL_DOUBLE_UNDERLINE: i64 = 1024
 const CELL_CUSTOM_UL_COLOR: i64 = 2048
+const CELL_PROTECTED: i64 = 4096
 
 /// Color type constants — Ghostty-style semantic color encoding.
 const COLOR_NONE: i64 = 0     // Use terminal default (fg→theme fg, bg→theme bg)
