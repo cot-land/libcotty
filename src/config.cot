@@ -53,6 +53,7 @@ struct Config {
     palette: List(i64),
     shell_command: string,
     background_opacity: i64,
+    option_as_alt: i64,  // 0=false (macOS composed chars), 1=true (ESC prefix)
 
     /// Create a Config with Monokai Remastered defaults.
     static fn init() Config {
@@ -73,6 +74,7 @@ struct Config {
             palette: palette,
             shell_command: "/bin/zsh",
             background_opacity: 100,
+            option_as_alt: 1,  // default: option=alt (terminal convention)
         }
     }
 
@@ -126,6 +128,20 @@ struct Config {
             if (opacity < 0) { opacity = 0 }
             if (opacity > 100) { opacity = 100 }
             cfg.background_opacity = opacity
+        }
+
+        // Option-as-alt: true/false or 1/0
+        const opt_alt_val = jsonObjectGet(root, "macos-option-as-alt")
+        if (opt_alt_val != 0) {
+            if (jsonTag(opt_alt_val) == JSON_BOOL) {
+                if (jsonGetBool(opt_alt_val)) {
+                    cfg.option_as_alt = 1
+                } else {
+                    cfg.option_as_alt = 0
+                }
+            } else if (jsonTag(opt_alt_val) == JSON_INT) {
+                cfg.option_as_alt = jsonGetInt(opt_alt_val)
+            }
         }
 
         // Colors

@@ -120,17 +120,20 @@ Conducted 2026-03-02.
 - Fixed: Added KEY_INSERT=276, tilde encoding (2~), Kitty mapping, Swift keyCode 114 (Help/Insert)
 
 ### 26. macOS option-as-alt not configurable
-- [ ] Option always treated as Alt. Users wanting Option+e → é get ESC e instead.
+- [x] Option always treated as Alt. Users wanting Option+e → é get ESC e instead.
+- Fixed: `option_as_alt` config (default true). `"macos-option-as-alt": false` in config.json. When disabled, Option+key uses macOS `interpretKeyEvents` → `insertText` to produce composed characters (é, ñ, etc.).
 
 ### 27. Mode 2031 (report_color_scheme) missing
 - [x] neovim uses this for dark/light theme detection.
 - Fixed: Added mode 2031 to setDecMode/queryDecMode, DSR 996 responds with CSI ? 997 ; 1/2 n based on bg luminance
 
 ### 28. Selection broken across scrollback
-- [ ] sel_start_row/sel_end_row are active-grid-relative, don't account for scrollback offset.
+- [x] sel_start_row/sel_end_row are active-grid-relative, don't account for scrollback offset.
+- Fixed: Selection coordinates stored as grid-absolute. `viewportStart()` converts screen-relative mouse to absolute. `getCellAbs`/`getRowWrapAbs` access cells without active_start offset. `gridScrollUp` wrapper adjusts selection on trim. Selection cleared on resize/alt-screen transitions.
 
 ### 29. No grapheme cluster / zero-width character support
-- [ ] Mode 2027 flag exists but putChar has no width=0 path or grapheme break detection.
+- [x] Mode 2027 flag exists but putChar has no width=0 path or grapheme break detection.
+- Fixed: charWidth() returns 0 for combining marks (U+0300-036F, etc.), ZWJ, variation selectors. putChar skips width=0 characters. Full grapheme clustering (mode 2027 with grapheme storage) still TODO.
 
 ### 30. Mouse modifier bits not encoded in button code
 - [x] Shift(+4), alt(+8), ctrl(+16) never added to mouse button code.
@@ -157,7 +160,7 @@ Conducted 2026-03-02.
 
 - [ ] 35. No search (Ctrl+F)
 - [ ] 36. No block/rectangular selection
-- [ ] 37. No eraseDisplay mode 22 (scroll-clear)
+- [x] 37. eraseDisplay mode 22 (scroll-clear) — scrolls active area into scrollback then erases. Kitty extension.
 - [x] 38. DECALN (ESC # 8) — fills screen with 'E', resets cursor. Added `#` intermediate routing and `decaln()`.
 - [x] 39. ESC E (NEL — next line) — CR + index. Added to ESC dispatch.
 - [ ] 40. No emoji/color glyph atlas
@@ -168,6 +171,6 @@ Conducted 2026-03-02.
 - [x] 45. F13-F20, numpad keys (KP 0-9, Enter, +, -, *, /, .) — constants, legacy tilde/char encoding, Kitty codepoints, Swift keyCode mapping
 - [x] 46. No bare `CSI u` for xterm restore-cursor — Added SCORC (CSI u) and SCOSC (CSI s) for xterm cursor save/restore
 - [x] 47. ANSI modes 2 (KAM), 12 (SRM) — Added `mode_keyboard_action` and `mode_send_receive` to setAnsiMode
-- [ ] 48. No DECSCA / SPA/EPA (cell protection)
+- [x] 48. DECSCA / SPA/EPA (cell protection) — `protected_mode` field (0=off, 1=DEC, 2=ISO). CSI " q (DECSCA), ESC V (SPA), ESC W (EPA). CELL_PROTECTED flag set on cells written while protected.
 - [ ] 49. OSC 9, OSC 1337, OSC 22
 - [x] 50. Copy-on-select — automatically copies selection to clipboard on mouseUp

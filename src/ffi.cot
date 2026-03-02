@@ -802,6 +802,11 @@ export fn cotty_config_bg_opacity() i64 {
     return g_app.config.background_opacity
 }
 
+/// Return option-as-alt setting: 0=false (macOS composed chars), 1=true (ESC prefix).
+export fn cotty_config_option_as_alt() i64 {
+    return g_app.config.option_as_alt
+}
+
 /// Set the font size. Clamped to 6–72.
 export fn cotty_config_set_font_size(size: i64) void {
     var s = size
