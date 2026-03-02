@@ -13,6 +13,9 @@ import "terminal"
 import "vt_parser"
 import "pty"
 import "inspector"
+import "selection"
+import "transaction"
+import "history"
 
 // ============================================================================
 // Pipe fd unpacking (same bit ops as pty.cot)
@@ -86,6 +89,7 @@ struct Surface {
     render_dirty: i64,
     child_exited: i64,
     inspector: Inspector,
+    history: History,
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
     static fn init() *Surface {
@@ -110,6 +114,7 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(24, 80),
+            history: History.init(),
         }
     }
 
@@ -138,6 +143,7 @@ struct Surface {
                 render_dirty: 0,
                 child_exited: 0,
                 inspector: Inspector.init(24, 80),
+                history: History.init(),
             }
         }
 
@@ -158,6 +164,7 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(24, 80),
+            history: History.init(),
         }
     }
 
@@ -197,6 +204,7 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(rows, cols),
+            history: History.init(),
         }
     }
 
@@ -207,12 +215,25 @@ struct Surface {
     }
 
     /// Handle an input action, mutating buffer and cursor as needed.
+    /// Text mutations go through transactions for undo/redo support.
     fn handleInput(action: InputAction, key: int) void {
         switch (action) {
             InputAction.insert_char => {
-                self.buffer.moveGapTo(self.cursor.offset)
-                self.buffer.insert(key)
-                self.cursor.offset += 1
+                const cursor_before = self.cursor.offset
+                // Build transaction: retain up to cursor, insert byte, retain rest
+                var cs = ChangeSet.init()
+                if (cursor_before > 0) { cs.retain(cursor_before) }
+                cs.insertByte(key)
+                const rest = self.buffer.len() - cursor_before
+                if (rest > 0) { cs.retain(rest) }
+                var txn = Transaction { changes: cs }
+                // Compute cursor_after
+                var cursor_after = cursor_before + 1
+                // Commit (computes inverse from original buffer), then apply
+                self.history.commit(txn, &self.buffer, cursor_before, cursor_after)
+                txn.apply(&self.buffer)
+                // Update cursor
+                self.cursor.offset = cursor_after
                 self.cursor.col += 1
                 if (key == '\n') {
                     self.cursor.line += 1
@@ -222,10 +243,19 @@ struct Surface {
             },
             InputAction.delete_back => {
                 if (self.cursor.offset > 0) {
-                    const deleted_char = self.buffer.charAt(self.cursor.offset - 1)
-                    self.buffer.moveGapTo(self.cursor.offset)
-                    self.buffer.deleteBack()
-                    self.cursor.offset -= 1
+                    const cursor_before = self.cursor.offset
+                    const deleted_char = self.buffer.charAt(cursor_before - 1)
+                    // Build transaction: retain to pos-1, delete 1, retain rest
+                    var cs = ChangeSet.init()
+                    if (cursor_before > 1) { cs.retain(cursor_before - 1) }
+                    cs.delete(1)
+                    const rest = self.buffer.len() - cursor_before
+                    if (rest > 0) { cs.retain(rest) }
+                    var txn = Transaction { changes: cs }
+                    const cursor_after = cursor_before - 1
+                    self.history.commit(txn, &self.buffer, cursor_before, cursor_after)
+                    txn.apply(&self.buffer)
+                    self.cursor.offset = cursor_after
                     if (deleted_char == '\n') {
                         self.recomputeLineCol()
                     } else {
@@ -236,8 +266,38 @@ struct Surface {
             },
             InputAction.delete_forward => {
                 if (self.cursor.offset < self.buffer.len()) {
-                    self.buffer.moveGapTo(self.cursor.offset)
-                    self.buffer.deleteForward()
+                    const cursor_before = self.cursor.offset
+                    // Build transaction: retain to pos, delete 1, retain rest
+                    var cs = ChangeSet.init()
+                    if (cursor_before > 0) { cs.retain(cursor_before) }
+                    cs.delete(1)
+                    const rest = self.buffer.len() - cursor_before - 1
+                    if (rest > 0) { cs.retain(rest) }
+                    var txn = Transaction { changes: cs }
+                    self.history.commit(txn, &self.buffer, cursor_before, cursor_before)
+                    txn.apply(&self.buffer)
+                    self.dirty = true
+                }
+            },
+            InputAction.undo => {
+                const cursor = self.history.undo(&self.buffer)
+                if (cursor >= 0) {
+                    self.cursor.offset = cursor
+                    if (self.cursor.offset > self.buffer.len()) {
+                        self.cursor.offset = self.buffer.len()
+                    }
+                    self.recomputeLineCol()
+                    self.dirty = true
+                }
+            },
+            InputAction.redo => {
+                const cursor = self.history.redo(&self.buffer)
+                if (cursor >= 0) {
+                    self.cursor.offset = cursor
+                    if (self.cursor.offset > self.buffer.len()) {
+                        self.cursor.offset = self.buffer.len()
+                    }
+                    self.recomputeLineCol()
                     self.dirty = true
                 }
             },
@@ -558,4 +618,93 @@ test "editor surface has inactive terminal" {
     @assertEq(s.terminal.grid.rows, 0)
     @assertEq(s.terminal.grid.cols, 0)
     @assertEq(s.shell.master_fd, -1)
+}
+
+test "surface undo insert" {
+    var s = Surface.init()
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    @assertEq(s.render(), "ab")
+    // Undo second insert
+    s.handleInput(InputAction.undo, 0)
+    @assertEq(s.render(), "a")
+    @assertEq(s.cursor.offset, 1)
+    // Undo first insert
+    s.handleInput(InputAction.undo, 0)
+    @assertEq(s.render(), "")
+    @assertEq(s.cursor.offset, 0)
+}
+
+test "surface redo after undo" {
+    var s = Surface.init()
+    s.handleInput(InputAction.insert_char, 'x')
+    s.handleInput(InputAction.insert_char, 'y')
+    @assertEq(s.render(), "xy")
+    s.handleInput(InputAction.undo, 0)
+    @assertEq(s.render(), "x")
+    s.handleInput(InputAction.redo, 0)
+    @assertEq(s.render(), "xy")
+    @assertEq(s.cursor.offset, 2)
+}
+
+test "surface undo delete back" {
+    var s = Surface.init()
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    s.handleInput(InputAction.insert_char, 'c')
+    s.handleInput(InputAction.delete_back, 0)
+    @assertEq(s.render(), "ab")
+    // Undo the delete — should restore 'c'
+    s.handleInput(InputAction.undo, 0)
+    @assertEq(s.render(), "abc")
+    @assertEq(s.cursor.offset, 3)
+}
+
+test "surface undo at root is no-op" {
+    var s = Surface.init()
+    s.handleInput(InputAction.undo, 0)
+    @assertEq(s.render(), "")
+    @assertEq(s.cursor.offset, 0)
+}
+
+test "surface redo at leaf is no-op" {
+    var s = Surface.init()
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.redo, 0)
+    @assertEq(s.render(), "a")
+    @assertEq(s.cursor.offset, 1)
+}
+
+test "surface undo redo preserves cursor" {
+    var s = Surface.init()
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    @assertEq(s.cursor.offset, 5)
+    @assertEq(s.cursor.col, 5)
+    s.handleInput(InputAction.undo, 0)
+    @assertEq(s.cursor.offset, 4)
+    @assertEq(s.cursor.col, 4)
+    s.handleInput(InputAction.redo, 0)
+    @assertEq(s.cursor.offset, 5)
+    @assertEq(s.cursor.col, 5)
+}
+
+test "surface undo delete forward" {
+    var s = Surface.init()
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    // Move cursor to start
+    s.handleInput(InputAction.move_left, 0)
+    s.handleInput(InputAction.move_left, 0)
+    // Delete forward ('a')
+    s.handleInput(InputAction.delete_forward, 0)
+    @assertEq(s.render(), "b")
+    @assertEq(s.cursor.offset, 0)
+    // Undo — should restore 'a'
+    s.handleInput(InputAction.undo, 0)
+    @assertEq(s.render(), "ab")
+    @assertEq(s.cursor.offset, 0)
 }

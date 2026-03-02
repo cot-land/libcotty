@@ -28,6 +28,8 @@ const InputAction = enum(u8) {
     move_line_end,
     page_up,
     page_down,
+    undo,
+    redo,
     save,
     quit,
     new_surface,
@@ -48,6 +50,8 @@ const InputAction = enum(u8) {
             .move_line_end => "move_line_end",
             .page_up => "page_up",
             .page_down => "page_down",
+            .undo => "undo",
+            .redo => "redo",
             .save => "save",
             .quit => "quit",
             .new_surface => "new_surface",
@@ -115,6 +119,8 @@ fn keyToAction(event: KeyEvent) InputAction {
     // Ctrl+key shortcuts
     if (has_ctrl) {
         return switch (event.key) {
+            'z' => InputAction.undo,
+            'y' => InputAction.redo,
             's' => InputAction.save,
             'q' => InputAction.quit,
             'n' => InputAction.new_surface,

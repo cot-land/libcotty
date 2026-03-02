@@ -123,6 +123,33 @@ struct ChangeSet {
         self.len_after += ins_text.len
     }
 
+    /// Add an insert operation for a single byte.
+    fn insertByte(b: int) void {
+        const text_off = self.text.count
+        self.text.append(@intCast(u8, b))
+        // Merge with previous insert
+        if (self.ops.count > 0) {
+            const last_idx = self.ops.count - 1
+            const last = self.ops.get(last_idx)
+            if (last.kind == OP_INSERT) {
+                self.ops.set(last_idx, Op { kind: OP_INSERT, n: last.n + 1, text_off: last.text_off })
+                self.len_after += 1
+                return
+            }
+            if (last.kind == OP_DELETE and self.ops.count > 1) {
+                const prev_idx = self.ops.count - 2
+                const prev = self.ops.get(prev_idx)
+                if (prev.kind == OP_INSERT) {
+                    self.ops.set(prev_idx, Op { kind: OP_INSERT, n: prev.n + 1, text_off: prev.text_off })
+                    self.len_after += 1
+                    return
+                }
+            }
+        }
+        self.ops.append(Op { kind: OP_INSERT, n: 1, text_off: text_off })
+        self.len_after += 1
+    }
+
     /// Insert bytes read from a buffer (used by invert to capture deleted text).
     fn insertFromBuffer(buf: *Buffer, buf_pos: int, n: int) void {
         if (n == 0) { return }
