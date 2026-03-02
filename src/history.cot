@@ -1,0 +1,286 @@
+/// Undo/redo history for editor surfaces.
+/// Port of Helix's history.rs — linear stack with redo branching.
+///
+/// Each edit creates a Revision containing the forward transaction and its
+/// inverse. Undo applies the inverse and moves to the parent. Redo follows
+/// the last_child pointer. New edits after undo create a new branch
+/// (orphaning the old redo path but not deleting it).
+///
+/// Reference: references/helix/helix-core/src/history.rs
+///
+/// NOTE: Cot compiler bug — never call a method on a temporary returned
+/// struct. Always store in a local first.
+
+import "std/list"
+import "buffer"
+import "transaction"
+
+/// A revision in the history DAG.
+/// Parent always points to a valid revision (root points to itself).
+/// last_child is -1 if there are no children (leaf node).
+struct Revision {
+    parent: int,
+    last_child: int,
+    transaction: Transaction,
+    inversion: Transaction,
+}
+
+/// History manages undo/redo as a tree of revisions.
+///
+/// Invariants:
+/// 1. Always has at least one revision (the empty root at index 0)
+/// 2. current is always a valid index
+/// 3. Revisions are append-only (never removed)
+/// 4. Root revision (0) has parent == 0 (points to self)
+struct History {
+    revisions: List(Revision),
+    current: int,
+
+    /// Create a new history with an empty root revision.
+    static fn init() History {
+        var revisions: List(Revision) = .{}
+        // Root revision: empty transactions, self-parent
+        const root = Revision {
+            parent: 0,
+            last_child: -1,
+            transaction: Transaction.init(),
+            inversion: Transaction.init(),
+        }
+        revisions.append(root)
+        return History { revisions: revisions, current: 0 }
+    }
+
+    /// Whether we're at the root (nothing to undo).
+    fn atRoot() bool {
+        return self.current == 0
+    }
+
+    /// Whether there's a redo path available.
+    fn canRedo() bool {
+        const rev = self.revisions.get(self.current)
+        return rev.last_child >= 0
+    }
+
+    /// Number of revisions (including root).
+    fn len() int {
+        return self.revisions.count
+    }
+
+    /// Commit a new revision. Computes the inverse from the buffer
+    /// (must be called BEFORE applying the transaction to the buffer).
+    fn commit(txn: Transaction, buf: *Buffer) void {
+        const inv = txn.invert(buf)
+        const new_idx = self.revisions.count
+        // Update current revision's last_child to point to the new revision
+        var curr_ptr = @intToPtr(*Revision, self.revisions.items + self.current * @sizeOf(Revision))
+        curr_ptr.last_child = new_idx
+        // Append the new revision
+        const rev = Revision {
+            parent: self.current,
+            last_child: -1,
+            transaction: txn,
+            inversion: inv,
+        }
+        self.revisions.append(rev)
+        self.current = new_idx
+    }
+
+    /// Undo: apply the current revision's inversion to the buffer.
+    /// Returns false if already at root.
+    fn undo(buf: *Buffer) bool {
+        if (self.current == 0) { return false }
+        const rev = self.revisions.get(self.current)
+        var inv = rev.inversion
+        inv.apply(buf)
+        self.current = rev.parent
+        return true
+    }
+
+    /// Redo: follow last_child and apply its transaction.
+    /// Returns false if no redo path available.
+    fn redo(buf: *Buffer) bool {
+        const rev = self.revisions.get(self.current)
+        if (rev.last_child < 0) { return false }
+        const child_idx = rev.last_child
+        const child = self.revisions.get(child_idx)
+        var txn = child.transaction
+        txn.apply(buf)
+        self.current = child_idx
+        return true
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "history init" {
+    var h = History.init()
+    @assertEq(h.len(), 1)
+    @assertEq(h.atRoot(), true)
+    @assertEq(h.canRedo(), false)
+}
+
+test "history commit" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("hello")
+    // Build a transaction: insert " world" at end
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    // Commit BEFORE applying (inversion needs original state)
+    h.commit(txn, &buf)
+    // Now apply
+    txn.apply(&buf)
+    @assertEq(buf.toString(), "hello world")
+    @assertEq(h.len(), 2)
+    @assertEq(h.atRoot(), false)
+}
+
+test "history undo" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("hello")
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    h.commit(txn, &buf)
+    txn.apply(&buf)
+    @assertEq(buf.toString(), "hello world")
+    // Undo
+    @assertEq(h.undo(&buf), true)
+    @assertEq(buf.toString(), "hello")
+    @assertEq(h.atRoot(), true)
+}
+
+test "history undo at root fails" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("hello")
+    @assertEq(h.undo(&buf), false)
+}
+
+test "history redo" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("hello")
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    h.commit(txn, &buf)
+    txn.apply(&buf)
+    @assertEq(buf.toString(), "hello world")
+    // Undo then redo
+    h.undo(&buf)
+    @assertEq(buf.toString(), "hello")
+    @assertEq(h.redo(&buf), true)
+    @assertEq(buf.toString(), "hello world")
+}
+
+test "history redo at leaf fails" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("hello")
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    h.commit(txn, &buf)
+    txn.apply(&buf)
+    // Already at latest — can't redo
+    @assertEq(h.canRedo(), false)
+    @assertEq(h.redo(&buf), false)
+}
+
+test "history multiple edits undo redo" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("a")
+    // Edit 1: "a" → "ab"
+    var c1: List(Change) = .{}
+    c1.append(Change { from: 1, to: 1, text: "b" })
+    var t1 = Transaction.fromChanges(1, &c1)
+    h.commit(t1, &buf)
+    t1.apply(&buf)
+    @assertEq(buf.toString(), "ab")
+    // Edit 2: "ab" → "abc"
+    var c2: List(Change) = .{}
+    c2.append(Change { from: 2, to: 2, text: "c" })
+    var t2 = Transaction.fromChanges(2, &c2)
+    h.commit(t2, &buf)
+    t2.apply(&buf)
+    @assertEq(buf.toString(), "abc")
+    // Undo once: "abc" → "ab"
+    @assertEq(h.undo(&buf), true)
+    @assertEq(buf.toString(), "ab")
+    // Undo again: "ab" → "a"
+    @assertEq(h.undo(&buf), true)
+    @assertEq(buf.toString(), "a")
+    @assertEq(h.atRoot(), true)
+    // Redo twice
+    @assertEq(h.redo(&buf), true)
+    @assertEq(buf.toString(), "ab")
+    @assertEq(h.redo(&buf), true)
+    @assertEq(buf.toString(), "abc")
+}
+
+test "history new edit after undo branches" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("a")
+    // Edit 1: "a" → "ab"
+    var c1: List(Change) = .{}
+    c1.append(Change { from: 1, to: 1, text: "b" })
+    var t1 = Transaction.fromChanges(1, &c1)
+    h.commit(t1, &buf)
+    t1.apply(&buf)
+    // Edit 2: "ab" → "abc"
+    var c2: List(Change) = .{}
+    c2.append(Change { from: 2, to: 2, text: "c" })
+    var t2 = Transaction.fromChanges(2, &c2)
+    h.commit(t2, &buf)
+    t2.apply(&buf)
+    @assertEq(buf.toString(), "abc")
+    // Undo twice back to "a"
+    h.undo(&buf)
+    h.undo(&buf)
+    @assertEq(buf.toString(), "a")
+    // New edit: "a" → "ax" (branches from root)
+    var c3: List(Change) = .{}
+    c3.append(Change { from: 1, to: 1, text: "x" })
+    var t3 = Transaction.fromChanges(1, &c3)
+    h.commit(t3, &buf)
+    t3.apply(&buf)
+    @assertEq(buf.toString(), "ax")
+    // Redo should follow the NEW branch, but there's no child from "ax"
+    @assertEq(h.canRedo(), false)
+    // Undo gets back to "a"
+    @assertEq(h.undo(&buf), true)
+    @assertEq(buf.toString(), "a")
+    // Redo now follows the last_child (which is the "ax" branch)
+    @assertEq(h.redo(&buf), true)
+    @assertEq(buf.toString(), "ax")
+}
+
+test "history delete and undo" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("hello world")
+    // Delete "world"
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 11, text: "" })
+    var txn = Transaction.fromChanges(11, &changes)
+    h.commit(txn, &buf)
+    txn.apply(&buf)
+    @assertEq(buf.toString(), "hello")
+    // Undo restores deleted text
+    @assertEq(h.undo(&buf), true)
+    @assertEq(buf.toString(), "hello world")
+}
+
+test "history replace and undo" {
+    var h = History.init()
+    var buf = Buffer.initWithContent("hello world")
+    // Replace "world" with "there"
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 6, to: 11, text: "there" })
+    var txn = Transaction.fromChanges(11, &changes)
+    h.commit(txn, &buf)
+    txn.apply(&buf)
+    @assertEq(buf.toString(), "hello there")
+    // Undo restores original
+    @assertEq(h.undo(&buf), true)
+    @assertEq(buf.toString(), "hello world")
+}

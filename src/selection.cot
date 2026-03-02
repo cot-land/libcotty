@@ -1,0 +1,532 @@
+/// Selection model for editor surfaces.
+/// Port of Helix's selection.rs — anchor-head ranges with multi-cursor support.
+///
+/// Key design decisions (matching Helix):
+/// - Anchor-head, not start-end — anchor stays fixed, head moves on extend
+/// - Byte offsets into the gap buffer (not character offsets)
+/// - Zero-width range = cursor (anchor == head)
+/// - Selection auto-normalizes: sorted, non-overlapping, primary valid
+///
+/// Reference: references/helix/helix-core/src/selection.rs
+///
+/// NOTE: Cot compiler bug — calling a method on a temporary returned struct
+/// crashes (SIGSEGV). Always store returned structs in a local variable
+/// before calling methods on them. E.g.:
+///   BAD:  list.get(i).from()
+///   GOOD: const r = list.get(i); r.from()
+
+import "std/list"
+
+/// Direction of a range (anchor relative to head).
+const DIRECTION_FORWARD: int = 0   // anchor <= head
+const DIRECTION_BACKWARD: int = 1  // anchor > head
+
+/// A single selection range with anchor (stationary) and head (moves on extend).
+///
+/// Examples (byte offsets into "Some text"):
+///   Range(0, 3): [Som]e text  — forward selection
+///   Range(3, 0): ]Som[e text  — backward selection
+///   Range(1, 1): S[]ome text  — cursor (zero-width)
+struct Range {
+    anchor: int,
+    head: int,
+
+    /// Create a range from anchor to head.
+    static fn init(anchor: int, head: int) Range {
+        return Range { anchor: anchor, head: head }
+    }
+
+    /// Create a zero-width cursor at a position.
+    static fn point(pos: int) Range {
+        return Range { anchor: pos, head: pos }
+    }
+
+    /// Inclusive start (smaller of anchor/head).
+    fn from() int {
+        if (self.anchor <= self.head) { return self.anchor }
+        return self.head
+    }
+
+    /// Exclusive end (larger of anchor/head).
+    fn to() int {
+        if (self.anchor >= self.head) { return self.anchor }
+        return self.head
+    }
+
+    /// Length of the selection in bytes.
+    fn len() int {
+        return self.to() - self.from()
+    }
+
+    /// Whether this is a zero-width cursor.
+    fn isEmpty() bool {
+        return self.anchor == self.head
+    }
+
+    /// Direction: forward if anchor <= head, backward otherwise.
+    fn direction() int {
+        if (self.head < self.anchor) { return DIRECTION_BACKWARD }
+        return DIRECTION_FORWARD
+    }
+
+    /// Swap anchor and head.
+    fn flip() Range {
+        return Range { anchor: self.head, head: self.anchor }
+    }
+
+    /// Whether a byte position falls within [from, to).
+    fn contains(pos: int) bool {
+        return self.from() <= pos and pos < self.to()
+    }
+
+    /// Whether two ranges overlap.
+    /// Ranges sharing only an endpoint don't overlap, except when
+    /// both start at the same position.
+    fn overlaps(other: Range) bool {
+        if (self.from() == other.from()) { return true }
+        return self.to() > other.from() and other.to() > self.from()
+    }
+
+    /// Merge two ranges into one encompassing range.
+    /// Tries to preserve direction if both have the same direction.
+    fn merge(other: Range) Range {
+        // Both backward: keep backward direction
+        if (self.anchor > self.head and other.anchor > other.head) {
+            var a = self.anchor
+            if (other.anchor > a) { a = other.anchor }
+            var h = self.head
+            if (other.head < h) { h = other.head }
+            return Range { anchor: a, head: h }
+        }
+        // Otherwise: merge forward
+        var start = self.from()
+        var other_from = other.from()
+        if (other_from < start) { start = other_from }
+        var end = self.to()
+        var other_to = other.to()
+        if (other_to > end) { end = other_to }
+        return Range { anchor: start, head: end }
+    }
+
+    /// Extend this range to include [from, to).
+    fn extend(from_pos: int, to_pos: int) Range {
+        if (self.anchor <= self.head) {
+            var a = self.anchor
+            if (from_pos < a) { a = from_pos }
+            var h = self.head
+            if (to_pos > h) { h = to_pos }
+            return Range { anchor: a, head: h }
+        }
+        // Backward
+        var a = self.anchor
+        if (to_pos > a) { a = to_pos }
+        var h = self.head
+        if (from_pos < h) { h = from_pos }
+        return Range { anchor: a, head: h }
+    }
+
+    /// Get the block cursor position (left side of the 1-char-wide cursor).
+    /// For forward ranges, this is one position before head.
+    fn cursor() int {
+        if (self.head > self.anchor) {
+            if (self.head > 0) { return self.head - 1 }
+            return 0
+        }
+        return self.head
+    }
+
+    /// Move cursor to char_idx, extending if extend is true.
+    fn putCursor(char_idx: int, do_extend: bool) Range {
+        if (do_extend) {
+            var a = self.anchor
+            // Crossing anchor: flip anchor side
+            if (self.head >= self.anchor and char_idx < self.anchor) {
+                a = self.anchor + 1
+            }
+            if (self.head < self.anchor and char_idx >= self.anchor) {
+                if (self.anchor > 0) { a = self.anchor - 1 }
+            }
+            if (a <= char_idx) {
+                return Range { anchor: a, head: char_idx + 1 }
+            }
+            return Range { anchor: a, head: char_idx }
+        }
+        return Range.point(char_idx)
+    }
+}
+
+/// A set of non-overlapping, sorted ranges with a primary (active) range.
+///
+/// Invariants (enforced by normalize()):
+/// 1. At least one range always exists
+/// 2. Ranges sorted by from()
+/// 3. Overlapping ranges merged
+/// 4. primary_index is valid
+struct Selection {
+    ranges: List(Range),
+    primary_index: int,
+
+    /// Create a single-range selection.
+    static fn init(anchor: int, head: int) Selection {
+        var ranges: List(Range) = .{}
+        ranges.append(Range.init(anchor, head))
+        return Selection { ranges: ranges, primary_index: 0 }
+    }
+
+    /// Create a cursor (zero-width selection) at a position.
+    static fn point(pos: int) Selection {
+        return Selection.init(pos, pos)
+    }
+
+    /// Create from a list of ranges with primary index. Normalizes.
+    static fn fromRanges(ranges: List(Range), primary: int) Selection {
+        var sel = Selection { ranges: ranges, primary_index: primary }
+        sel.normalize()
+        return sel
+    }
+
+    /// Get the primary (active) range.
+    fn primary() Range {
+        return self.ranges.get(self.primary_index)
+    }
+
+    /// Number of ranges.
+    fn len() int {
+        return self.ranges.count
+    }
+
+    /// Get range at index.
+    fn get(index: int) Range {
+        return self.ranges.get(index)
+    }
+
+    /// Add a range and make it primary. Normalizes.
+    fn push(range: Range) void {
+        self.ranges.append(range)
+        self.primary_index = self.ranges.count - 1
+        self.normalize()
+    }
+
+    /// Remove a range by index. Asserts at least one remains.
+    fn remove(index: int) void {
+        if (self.ranges.count <= 1) { return }  // Can't remove last
+        // Shift elements left
+        var i = index
+        while (i < self.ranges.count - 1) {
+            self.ranges.set(i, self.ranges.get(i + 1))
+            i += 1
+        }
+        self.ranges.count -= 1
+        if (index < self.primary_index or self.primary_index >= self.ranges.count) {
+            self.primary_index -= 1
+        }
+        if (self.primary_index < 0) { self.primary_index = 0 }
+    }
+
+    /// Replace the range at index. Normalizes.
+    fn replace(index: int, range: Range) void {
+        self.ranges.set(index, range)
+        self.normalize()
+    }
+
+    /// Reduce to only the primary range.
+    fn intoSingle() void {
+        if (self.ranges.count <= 1) { return }
+        const primary = self.ranges.get(self.primary_index)
+        self.ranges.count = 0
+        self.ranges.append(primary)
+        self.primary_index = 0
+    }
+
+    /// Sort ranges, merge overlaps, fix primary index.
+    /// This is the critical invariant keeper — called after every mutation.
+    fn normalize() void {
+        if (self.ranges.count < 2) { return }
+
+        // Remember primary range for tracking
+        const primary = self.ranges.get(self.primary_index)
+        const primary_anchor = primary.anchor
+        const primary_head = primary.head
+
+        // Insertion sort by from() — stable sort preserves order of equal elements
+        var i = 1
+        while (i < self.ranges.count) {
+            const key = self.ranges.get(i)
+            const key_from = key.from()
+            var j = i - 1
+            while (j >= 0) {
+                const jrange = self.ranges.get(j)
+                const jfrom = jrange.from()
+                if (jfrom <= key_from) { break }
+                self.ranges.set(j + 1, jrange)
+                j -= 1
+            }
+            self.ranges.set(j + 1, key)
+            i += 1
+        }
+
+        // Merge overlapping ranges (in-place dedup)
+        var write = 0
+        var merged_primary_anchor = primary_anchor
+        var merged_primary_head = primary_head
+        var read = 1
+        while (read < self.ranges.count) {
+            const prev = self.ranges.get(write)
+            const curr = self.ranges.get(read)
+            if (prev.overlaps(curr)) {
+                const merged = prev.merge(curr)
+                // Track if primary was involved in this merge
+                var is_primary = false
+                if (prev.anchor == primary_anchor and prev.head == primary_head) {
+                    is_primary = true
+                }
+                if (curr.anchor == primary_anchor and curr.head == primary_head) {
+                    is_primary = true
+                }
+                if (is_primary) {
+                    merged_primary_anchor = merged.anchor
+                    merged_primary_head = merged.head
+                }
+                self.ranges.set(write, merged)
+            } else {
+                write += 1
+                self.ranges.set(write, curr)
+            }
+            read += 1
+        }
+        self.ranges.count = write + 1
+
+        // Recompute primary index by finding the merged primary
+        self.primary_index = 0
+        var k = 0
+        while (k < self.ranges.count) {
+            const r = self.ranges.get(k)
+            if (r.anchor == merged_primary_anchor and r.head == merged_primary_head) {
+                self.primary_index = k
+                break
+            }
+            k += 1
+        }
+        // Clamp primary_index
+        if (self.primary_index >= self.ranges.count) {
+            self.primary_index = self.ranges.count - 1
+        }
+    }
+
+    /// Convert all ranges to zero-width cursors at their cursor() position.
+    fn cursors() void {
+        var i = 0
+        while (i < self.ranges.count) {
+            const r = self.ranges.get(i)
+            self.ranges.set(i, Range.point(r.cursor()))
+            i += 1
+        }
+        self.normalize()
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "range init" {
+    const r = Range.init(0, 5)
+    @assertEq(r.anchor, 0)
+    @assertEq(r.head, 5)
+    @assertEq(r.from(), 0)
+    @assertEq(r.to(), 5)
+    @assertEq(r.len(), 5)
+}
+
+test "range point" {
+    const r = Range.point(3)
+    @assertEq(r.anchor, 3)
+    @assertEq(r.head, 3)
+    @assertEq(r.isEmpty(), true)
+    @assertEq(r.len(), 0)
+}
+
+test "range backward" {
+    const r = Range.init(5, 2)
+    @assertEq(r.from(), 2)
+    @assertEq(r.to(), 5)
+    @assertEq(r.len(), 3)
+    @assertEq(r.direction(), DIRECTION_BACKWARD)
+}
+
+test "range forward direction" {
+    const r = Range.init(0, 5)
+    @assertEq(r.direction(), DIRECTION_FORWARD)
+}
+
+test "range contains" {
+    const r = Range.init(2, 6)
+    @assertEq(r.contains(0), false)
+    @assertEq(r.contains(1), false)
+    @assertEq(r.contains(2), true)
+    @assertEq(r.contains(4), true)
+    @assertEq(r.contains(5), true)
+    @assertEq(r.contains(6), false)
+}
+
+test "range flip" {
+    const r = Range.init(1, 5)
+    const f = r.flip()
+    @assertEq(f.anchor, 5)
+    @assertEq(f.head, 1)
+}
+
+test "range overlaps same start" {
+    const a = Range.init(0, 3)
+    const b = Range.init(0, 5)
+    @assertEq(a.overlaps(b), true)
+}
+
+test "range overlaps partial" {
+    const a = Range.init(0, 5)
+    const b = Range.init(3, 8)
+    @assertEq(a.overlaps(b), true)
+}
+
+test "range no overlap" {
+    const a = Range.init(0, 3)
+    const b = Range.init(3, 6)
+    @assertEq(a.overlaps(b), false)
+}
+
+test "range no overlap separated" {
+    const a = Range.init(0, 2)
+    const b = Range.init(5, 8)
+    @assertEq(a.overlaps(b), false)
+}
+
+test "range merge forward" {
+    const a = Range.init(0, 5)
+    const b = Range.init(3, 8)
+    const m = a.merge(b)
+    @assertEq(m.from(), 0)
+    @assertEq(m.to(), 8)
+}
+
+test "range merge both backward" {
+    const a = Range.init(5, 0)
+    const b = Range.init(8, 3)
+    const m = a.merge(b)
+    @assertEq(m.anchor, 8)
+    @assertEq(m.head, 0)
+}
+
+test "range cursor forward" {
+    const r = Range.init(0, 5)
+    @assertEq(r.cursor(), 4)
+}
+
+test "range cursor backward" {
+    const r = Range.init(5, 2)
+    @assertEq(r.cursor(), 2)
+}
+
+test "range cursor point" {
+    const r = Range.point(3)
+    @assertEq(r.cursor(), 3)
+}
+
+test "range extend" {
+    const r = Range.init(2, 5)
+    const e = r.extend(0, 3)
+    @assertEq(e.from(), 0)
+    @assertEq(e.to(), 5)
+}
+
+test "range putCursor no extend" {
+    const r = Range.init(0, 5)
+    const p = r.putCursor(3, false)
+    @assertEq(p.anchor, 3)
+    @assertEq(p.head, 3)
+}
+
+test "range putCursor extend forward" {
+    const r = Range.init(2, 5)
+    const p = r.putCursor(8, true)
+    @assertEq(p.anchor, 2)
+    @assertEq(p.head, 9)
+}
+
+test "selection single" {
+    var sel = Selection.init(0, 5)
+    @assertEq(sel.len(), 1)
+    const p = sel.primary()
+    @assertEq(p.anchor, 0)
+    @assertEq(p.head, 5)
+}
+
+test "selection point" {
+    var sel = Selection.point(3)
+    @assertEq(sel.len(), 1)
+    const p = sel.primary()
+    @assertEq(p.anchor, 3)
+    @assertEq(p.head, 3)
+}
+
+test "selection push and normalize" {
+    var sel = Selection.init(0, 3)
+    sel.push(Range.init(5, 8))
+    @assertEq(sel.len(), 2)
+    // Primary should be the newly pushed range
+    const p = sel.primary()
+    @assertEq(p.from(), 5)
+}
+
+test "selection push overlapping merges" {
+    var sel = Selection.init(0, 5)
+    sel.push(Range.init(3, 8))
+    @assertEq(sel.len(), 1)
+    const p = sel.primary()
+    @assertEq(p.from(), 0)
+    @assertEq(p.to(), 8)
+}
+
+test "selection normalize sorts" {
+    var ranges: List(Range) = .{}
+    ranges.append(Range.init(5, 8))
+    ranges.append(Range.init(0, 3))
+    var sel = Selection.fromRanges(ranges, 0)
+    // After normalize: [0,3) comes first, [5,8) second
+    const r0 = sel.get(0)
+    const r1 = sel.get(1)
+    @assertEq(r0.from(), 0)
+    @assertEq(r1.from(), 5)
+}
+
+test "selection remove" {
+    var sel = Selection.init(0, 3)
+    sel.push(Range.init(5, 8))
+    sel.push(Range.init(10, 13))
+    @assertEq(sel.len(), 3)
+    sel.remove(1)
+    @assertEq(sel.len(), 2)
+    const r0 = sel.get(0)
+    const r1 = sel.get(1)
+    @assertEq(r0.from(), 0)
+    @assertEq(r1.from(), 10)
+}
+
+test "selection into single" {
+    var sel = Selection.init(0, 3)
+    sel.push(Range.init(5, 8))
+    sel.push(Range.init(10, 13))
+    sel.intoSingle()
+    @assertEq(sel.len(), 1)
+}
+
+test "selection cursors" {
+    var sel = Selection.init(0, 5)
+    sel.push(Range.init(8, 12))
+    sel.cursors()
+    const r0 = sel.get(0)
+    const r1 = sel.get(1)
+    @assertEq(r0.isEmpty(), true)
+    @assertEq(r1.isEmpty(), true)
+    @assertEq(r0.anchor, 4)  // cursor() of Range(0,5) = 4
+    @assertEq(r1.anchor, 11) // cursor() of Range(8,12) = 11
+}

@@ -1,0 +1,562 @@
+/// Transaction system for editor surfaces.
+/// Port of Helix's transaction.rs — operational transform style edits.
+///
+/// Edits are expressed as sequences of Retain/Delete/Insert operations.
+/// A ChangeSet describes a transformation from one document state to another.
+/// A Transaction wraps a ChangeSet for use with the undo/redo system.
+///
+/// Reference: references/helix/helix-core/src/transaction.rs
+///
+/// NOTE: Cot compiler bug — never call a method on a temporary returned
+/// struct. Always store in a local first. See selection.cot header.
+
+import "std/list"
+import "buffer"
+
+/// Operation types for changesets.
+const OP_RETAIN: int = 0
+const OP_DELETE: int = 1
+const OP_INSERT: int = 2
+
+/// Position association for mapping through edits.
+const ASSOC_BEFORE: int = 0  // Stay before insertions at this position
+const ASSOC_AFTER: int = 1   // Move after insertions at this position
+
+/// A single operation in a changeset.
+/// For RETAIN/DELETE: n is the byte count, text_off is unused.
+/// For INSERT: n is the byte count of inserted text, text_off is the
+/// offset into the parent ChangeSet's text buffer.
+struct Op {
+    kind: int,
+    n: int,
+    text_off: int,
+}
+
+/// A set of edit operations that transforms a document.
+///
+/// Tracks original document length (len) and resulting length (len_after).
+/// Operations are built incrementally with retain/delete/insert, which
+/// merge consecutive same-type operations automatically.
+///
+/// The text buffer stores all inserted text contiguously. INSERT operations
+/// reference ranges within it via text_off and n.
+struct ChangeSet {
+    ops: List(Op),
+    text: List(u8),
+    len: int,
+    len_after: int,
+
+    /// Create an empty changeset.
+    static fn init() ChangeSet {
+        var ops: List(Op) = .{}
+        var text: List(u8) = .{}
+        return ChangeSet { ops: ops, text: text, len: 0, len_after: 0 }
+    }
+
+    /// Add a retain operation (skip n bytes unchanged).
+    fn retain(n: int) void {
+        if (n == 0) { return }
+        // Merge with previous retain
+        if (self.ops.count > 0) {
+            const last_idx = self.ops.count - 1
+            const last = self.ops.get(last_idx)
+            if (last.kind == OP_RETAIN) {
+                self.ops.set(last_idx, Op { kind: OP_RETAIN, n: last.n + n, text_off: 0 })
+                self.len += n
+                self.len_after += n
+                return
+            }
+        }
+        self.ops.append(Op { kind: OP_RETAIN, n: n, text_off: 0 })
+        self.len += n
+        self.len_after += n
+    }
+
+    /// Add a delete operation (remove n bytes).
+    fn delete(n: int) void {
+        if (n == 0) { return }
+        // Merge with previous delete
+        if (self.ops.count > 0) {
+            const last_idx = self.ops.count - 1
+            const last = self.ops.get(last_idx)
+            if (last.kind == OP_DELETE) {
+                self.ops.set(last_idx, Op { kind: OP_DELETE, n: last.n + n, text_off: 0 })
+                self.len += n
+                return
+            }
+        }
+        self.ops.append(Op { kind: OP_DELETE, n: n, text_off: 0 })
+        self.len += n
+    }
+
+    /// Add an insert operation (add text bytes).
+    /// Text is copied into the internal text buffer.
+    fn insert(ins_text: string) void {
+        if (ins_text.len == 0) { return }
+        const text_off = self.text.count
+        var i = 0
+        while (i < ins_text.len) {
+            self.text.append(ins_text[i])
+            i += 1
+        }
+        // Merge with previous insert
+        if (self.ops.count > 0) {
+            const last_idx = self.ops.count - 1
+            const last = self.ops.get(last_idx)
+            if (last.kind == OP_INSERT) {
+                self.ops.set(last_idx, Op { kind: OP_INSERT, n: last.n + ins_text.len, text_off: last.text_off })
+                self.len_after += ins_text.len
+                return
+            }
+            // Merge Insert before Delete: [Insert, Delete] replacement pattern
+            if (last.kind == OP_DELETE and self.ops.count > 1) {
+                const prev_idx = self.ops.count - 2
+                const prev = self.ops.get(prev_idx)
+                if (prev.kind == OP_INSERT) {
+                    self.ops.set(prev_idx, Op { kind: OP_INSERT, n: prev.n + ins_text.len, text_off: prev.text_off })
+                    self.len_after += ins_text.len
+                    return
+                }
+            }
+        }
+        self.ops.append(Op { kind: OP_INSERT, n: ins_text.len, text_off: text_off })
+        self.len_after += ins_text.len
+    }
+
+    /// Insert bytes read from a buffer (used by invert to capture deleted text).
+    fn insertFromBuffer(buf: *Buffer, buf_pos: int, n: int) void {
+        if (n == 0) { return }
+        const text_off = self.text.count
+        var j = 0
+        while (j < n) {
+            self.text.append(@intCast(u8, buf.charAt(buf_pos + j)))
+            j += 1
+        }
+        self.ops.append(Op { kind: OP_INSERT, n: n, text_off: text_off })
+        self.len_after += n
+    }
+
+    /// Apply this changeset to a buffer. Returns false if doc length mismatch.
+    fn apply(buf: *Buffer) bool {
+        if (buf.len() != self.len) { return false }
+        var pos = 0
+        var i = 0
+        while (i < self.ops.count) {
+            const op = self.ops.get(i)
+            if (op.kind == OP_RETAIN) {
+                pos += op.n
+            }
+            if (op.kind == OP_DELETE) {
+                buf.moveGapTo(pos)
+                var j = 0
+                while (j < op.n) {
+                    buf.deleteForward()
+                    j += 1
+                }
+            }
+            if (op.kind == OP_INSERT) {
+                buf.moveGapTo(pos)
+                var j = 0
+                while (j < op.n) {
+                    buf.insert(self.text.get(op.text_off + j))
+                    j += 1
+                }
+                pos += op.n
+            }
+            i += 1
+        }
+        return true
+    }
+
+    /// Create the inverse changeset (for undo).
+    /// Requires the original buffer state to recover deleted text.
+    fn invert(buf: *Buffer) ChangeSet {
+        var inv = ChangeSet.init()
+        var pos = 0
+        var i = 0
+        while (i < self.ops.count) {
+            const op = self.ops.get(i)
+            if (op.kind == OP_RETAIN) {
+                inv.retain(op.n)
+                pos += op.n
+            }
+            if (op.kind == OP_DELETE) {
+                inv.insertFromBuffer(buf, pos, op.n)
+                pos += op.n
+            }
+            if (op.kind == OP_INSERT) {
+                inv.delete(op.n)
+            }
+            i += 1
+        }
+        return inv
+    }
+
+    /// Map a position in the original document to the new document.
+    /// assoc determines behavior at insert boundaries:
+    ///   ASSOC_BEFORE: stay before inserted text
+    ///   ASSOC_AFTER: move after inserted text
+    fn mapPos(pos: int, assoc: int) int {
+        var old_pos = 0
+        var new_pos = 0
+        var i = 0
+        while (i < self.ops.count) {
+            const op = self.ops.get(i)
+            if (op.kind == OP_RETAIN) {
+                if (pos < old_pos + op.n) {
+                    return new_pos + (pos - old_pos)
+                }
+                old_pos += op.n
+                new_pos += op.n
+            }
+            if (op.kind == OP_DELETE) {
+                if (pos < old_pos + op.n) {
+                    return new_pos
+                }
+                old_pos += op.n
+            }
+            if (op.kind == OP_INSERT) {
+                if (old_pos == pos and assoc == ASSOC_AFTER) {
+                    return new_pos + op.n
+                }
+                if (old_pos == pos and assoc == ASSOC_BEFORE) {
+                    return new_pos
+                }
+                new_pos += op.n
+            }
+            i += 1
+        }
+        return new_pos + (pos - old_pos)
+    }
+
+    /// Whether this changeset is a no-op.
+    fn isEmpty() bool {
+        if (self.ops.count == 0) { return true }
+        if (self.ops.count == 1) {
+            const op = self.ops.get(0)
+            if (op.kind == OP_RETAIN) { return true }
+        }
+        return false
+    }
+}
+
+/// A change tuple for building transactions: replace [from, to) with text.
+/// If text is "", this is a pure deletion.
+/// If from == to, this is a pure insertion.
+struct Change {
+    from: int,
+    to: int,
+    text: string,
+}
+
+/// A transaction wraps a changeset for the undo/redo system.
+struct Transaction {
+    changes: ChangeSet,
+
+    /// Create an empty transaction.
+    static fn init() Transaction {
+        return Transaction { changes: ChangeSet.init() }
+    }
+
+    /// Build a transaction from sorted, non-overlapping change tuples.
+    /// doc_len is the original document length in bytes.
+    static fn fromChanges(doc_len: int, change_list: *List(Change)) Transaction {
+        var cs = ChangeSet.init()
+        var last = 0
+        var i = 0
+        while (i < change_list.count) {
+            const c = change_list.get(i)
+            // Retain gap before this change
+            if (c.from > last) {
+                cs.retain(c.from - last)
+            }
+            // Insert new text (Helix: insert before delete for replacements)
+            if (c.text.len > 0) {
+                cs.insert(c.text)
+            }
+            // Delete old text
+            if (c.to > c.from) {
+                cs.delete(c.to - c.from)
+            }
+            last = c.to
+            i += 1
+        }
+        // Retain remainder
+        if (last < doc_len) {
+            cs.retain(doc_len - last)
+        }
+        return Transaction { changes: cs }
+    }
+
+    /// Apply this transaction to a buffer.
+    fn apply(buf: *Buffer) bool {
+        return self.changes.apply(buf)
+    }
+
+    /// Create the inverse transaction (for undo).
+    fn invert(buf: *Buffer) Transaction {
+        return Transaction { changes: self.changes.invert(buf) }
+    }
+
+    /// Map a position through this transaction's changes.
+    fn mapPos(pos: int, assoc: int) int {
+        return self.changes.mapPos(pos, assoc)
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "changeset empty is noop" {
+    var cs = ChangeSet.init()
+    @assertEq(cs.isEmpty(), true)
+}
+
+test "changeset retain only is noop" {
+    var cs = ChangeSet.init()
+    cs.retain(10)
+    @assertEq(cs.isEmpty(), true)
+    @assertEq(cs.len, 10)
+    @assertEq(cs.len_after, 10)
+}
+
+test "changeset retain merges" {
+    var cs = ChangeSet.init()
+    cs.retain(3)
+    cs.retain(5)
+    @assertEq(cs.ops.count, 1)
+    const op = cs.ops.get(0)
+    @assertEq(op.n, 8)
+}
+
+test "changeset delete merges" {
+    var cs = ChangeSet.init()
+    cs.delete(2)
+    cs.delete(3)
+    @assertEq(cs.ops.count, 1)
+    const op = cs.ops.get(0)
+    @assertEq(op.kind, OP_DELETE)
+    @assertEq(op.n, 5)
+    @assertEq(cs.len, 5)
+    @assertEq(cs.len_after, 0)
+}
+
+test "changeset insert merges" {
+    var cs = ChangeSet.init()
+    cs.insert("hel")
+    cs.insert("lo")
+    @assertEq(cs.ops.count, 1)
+    const op = cs.ops.get(0)
+    @assertEq(op.kind, OP_INSERT)
+    @assertEq(op.n, 5)
+    @assertEq(cs.len_after, 5)
+    // Verify text buffer contents
+    @assertEq(cs.text.count, 5)
+    @assertEq(cs.text.get(0), 104) // 'h'
+    @assertEq(cs.text.get(4), 111) // 'o'
+}
+
+test "changeset len tracking" {
+    var cs = ChangeSet.init()
+    cs.retain(3)
+    cs.delete(2)
+    cs.insert("abc")
+    cs.retain(4)
+    @assertEq(cs.len, 9)       // 3 + 2 + 4 = 9 original bytes
+    @assertEq(cs.len_after, 10) // 3 + 3 + 4 = 10 result bytes
+}
+
+test "changeset apply insert" {
+    var buf = Buffer.initWithContent("hello")
+    var cs = ChangeSet.init()
+    cs.retain(5)
+    cs.insert(" world")
+    @assertEq(cs.apply(&buf), true)
+    @assertEq(buf.len(), 11)
+    @assertEq(buf.toString(), "hello world")
+}
+
+test "changeset apply delete" {
+    var buf = Buffer.initWithContent("hello world")
+    var cs = ChangeSet.init()
+    cs.retain(5)
+    cs.delete(6)
+    @assertEq(cs.apply(&buf), true)
+    @assertEq(buf.len(), 5)
+    @assertEq(buf.toString(), "hello")
+}
+
+test "changeset apply replace" {
+    var buf = Buffer.initWithContent("hello world")
+    var cs = ChangeSet.init()
+    cs.retain(6)
+    cs.insert("there")
+    cs.delete(5)
+    @assertEq(cs.apply(&buf), true)
+    @assertEq(buf.toString(), "hello there")
+}
+
+test "changeset apply insert at start" {
+    var buf = Buffer.initWithContent("world")
+    var cs = ChangeSet.init()
+    cs.insert("hello ")
+    cs.retain(5)
+    @assertEq(cs.apply(&buf), true)
+    @assertEq(buf.toString(), "hello world")
+}
+
+test "changeset apply length mismatch fails" {
+    var buf = Buffer.initWithContent("hello")
+    var cs = ChangeSet.init()
+    cs.retain(10)
+    @assertEq(cs.apply(&buf), false)
+}
+
+test "changeset invert delete" {
+    var buf = Buffer.initWithContent("hello world")
+    var cs = ChangeSet.init()
+    cs.retain(5)
+    cs.delete(6)
+    // Apply forward
+    var buf2 = Buffer.initWithContent("hello world")
+    cs.apply(&buf2)
+    @assertEq(buf2.toString(), "hello")
+    // Invert using original
+    var inv = cs.invert(&buf)
+    // Apply inverse to get back original
+    @assertEq(inv.apply(&buf2), true)
+    @assertEq(buf2.toString(), "hello world")
+}
+
+test "changeset invert insert" {
+    var buf = Buffer.initWithContent("hello")
+    var cs = ChangeSet.init()
+    cs.retain(5)
+    cs.insert(" world")
+    // Apply forward
+    var buf2 = Buffer.initWithContent("hello")
+    cs.apply(&buf2)
+    @assertEq(buf2.toString(), "hello world")
+    // Invert
+    var inv = cs.invert(&buf)
+    @assertEq(inv.apply(&buf2), true)
+    @assertEq(buf2.toString(), "hello")
+}
+
+test "changeset invert replace" {
+    var buf = Buffer.initWithContent("hello world")
+    var cs = ChangeSet.init()
+    cs.retain(6)
+    cs.insert("there")
+    cs.delete(5)
+    // Apply
+    var buf2 = Buffer.initWithContent("hello world")
+    cs.apply(&buf2)
+    @assertEq(buf2.toString(), "hello there")
+    // Invert and undo
+    var inv = cs.invert(&buf)
+    @assertEq(inv.apply(&buf2), true)
+    @assertEq(buf2.toString(), "hello world")
+}
+
+test "changeset mapPos retain" {
+    var cs = ChangeSet.init()
+    cs.retain(10)
+    @assertEq(cs.mapPos(0, ASSOC_BEFORE), 0)
+    @assertEq(cs.mapPos(5, ASSOC_BEFORE), 5)
+    @assertEq(cs.mapPos(9, ASSOC_BEFORE), 9)
+}
+
+test "changeset mapPos delete" {
+    var cs = ChangeSet.init()
+    cs.retain(2)
+    cs.delete(3)
+    cs.retain(5)
+    // Positions 0-1: before delete, unchanged
+    @assertEq(cs.mapPos(0, ASSOC_BEFORE), 0)
+    @assertEq(cs.mapPos(1, ASSOC_BEFORE), 1)
+    // Positions 2-4: within deleted range, map to deletion point
+    @assertEq(cs.mapPos(2, ASSOC_BEFORE), 2)
+    @assertEq(cs.mapPos(3, ASSOC_BEFORE), 2)
+    @assertEq(cs.mapPos(4, ASSOC_BEFORE), 2)
+    // Positions 5+: after delete, shifted by -3
+    @assertEq(cs.mapPos(5, ASSOC_BEFORE), 2)
+    @assertEq(cs.mapPos(6, ASSOC_BEFORE), 3)
+    @assertEq(cs.mapPos(9, ASSOC_BEFORE), 6)
+}
+
+test "changeset mapPos insert" {
+    var cs = ChangeSet.init()
+    cs.retain(2)
+    cs.insert("abc")
+    cs.retain(3)
+    // Positions before insert
+    @assertEq(cs.mapPos(0, ASSOC_BEFORE), 0)
+    @assertEq(cs.mapPos(1, ASSOC_BEFORE), 1)
+    // Position at insert boundary
+    @assertEq(cs.mapPos(2, ASSOC_BEFORE), 2)
+    @assertEq(cs.mapPos(2, ASSOC_AFTER), 5)
+    // Positions after insert
+    @assertEq(cs.mapPos(3, ASSOC_BEFORE), 6)
+    @assertEq(cs.mapPos(4, ASSOC_BEFORE), 7)
+}
+
+test "transaction from changes single insert" {
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var buf = Buffer.initWithContent("hello")
+    var txn = Transaction.fromChanges(5, &changes)
+    @assertEq(txn.apply(&buf), true)
+    @assertEq(buf.toString(), "hello world")
+}
+
+test "transaction from changes single delete" {
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 11, text: "" })
+    var buf = Buffer.initWithContent("hello world")
+    var txn = Transaction.fromChanges(11, &changes)
+    @assertEq(txn.apply(&buf), true)
+    @assertEq(buf.toString(), "hello")
+}
+
+test "transaction from changes replace" {
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 6, to: 11, text: "there" })
+    var buf = Buffer.initWithContent("hello world")
+    var txn = Transaction.fromChanges(11, &changes)
+    @assertEq(txn.apply(&buf), true)
+    @assertEq(buf.toString(), "hello there")
+}
+
+test "transaction from changes multiple" {
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 0, to: 0, text: "(" })
+    changes.append(Change { from: 5, to: 5, text: ")" })
+    var buf = Buffer.initWithContent("hello")
+    var txn = Transaction.fromChanges(5, &changes)
+    @assertEq(txn.apply(&buf), true)
+    @assertEq(buf.toString(), "(hello)")
+}
+
+test "transaction invert" {
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 6, to: 11, text: "there" })
+    var orig = Buffer.initWithContent("hello world")
+    var buf = Buffer.initWithContent("hello world")
+    var txn = Transaction.fromChanges(11, &changes)
+    txn.apply(&buf)
+    @assertEq(buf.toString(), "hello there")
+    var inv = txn.invert(&orig)
+    inv.apply(&buf)
+    @assertEq(buf.toString(), "hello world")
+}
+
+test "transaction mapPos" {
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    @assertEq(txn.mapPos(3, ASSOC_BEFORE), 3)
+    @assertEq(txn.mapPos(5, ASSOC_BEFORE), 5)
+    @assertEq(txn.mapPos(5, ASSOC_AFTER), 11)
+}
