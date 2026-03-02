@@ -794,11 +794,90 @@ struct TerminalState {
         }
     }
 
+    // -- Unicode width detection -----------------------------------------------
+
+    /// Return the display width of a Unicode codepoint (1 or 2).
+    /// Double-width: CJK ideographs, Hangul, fullwidth forms, wide emoji.
+    /// Ghostty ref: unicode.zig charWidth — East Asian Width property.
+    static fn charWidth(cp: i64) i64 {
+        // Common fast path: ASCII is always width 1
+        if (cp < 0x1100) { return 1 }
+
+        // Hangul Jamo
+        if (cp >= 0x1100 and cp <= 0x115F) { return 2 }
+        if (cp >= 0x2329 and cp <= 0x232A) { return 2 }
+
+        // CJK Radicals Supplement through CJK Symbols and Punctuation
+        if (cp >= 0x2E80 and cp <= 0x303E) { return 2 }
+
+        // Hiragana, Katakana, Bopomofo, Hangul Compat Jamo, Kanbun,
+        // Bopomofo Extended, CJK Strokes, Katakana Phonetic Extensions,
+        // Enclosed CJK Letters, CJK Compatibility
+        if (cp >= 0x3041 and cp <= 0x33BF) { return 2 }
+
+        // CJK Unified Ideographs Extension A
+        if (cp >= 0x3400 and cp <= 0x4DBF) { return 2 }
+
+        // CJK Unified Ideographs
+        if (cp >= 0x4E00 and cp <= 0x9FFF) { return 2 }
+
+        // Yi Syllables and Radicals
+        if (cp >= 0xA000 and cp <= 0xA4CF) { return 2 }
+
+        // Hangul Jamo Extended-A
+        if (cp >= 0xA960 and cp <= 0xA97C) { return 2 }
+
+        // Hangul Syllables
+        if (cp >= 0xAC00 and cp <= 0xD7A3) { return 2 }
+
+        // CJK Compatibility Ideographs
+        if (cp >= 0xF900 and cp <= 0xFAFF) { return 2 }
+
+        // Vertical Forms, CJK Compatibility Forms, Small Form Variants
+        if (cp >= 0xFE10 and cp <= 0xFE6F) { return 2 }
+
+        // Fullwidth Forms (FF01-FF60 are fullwidth, FF61-FFDC are halfwidth)
+        if (cp >= 0xFF01 and cp <= 0xFF60) { return 2 }
+        if (cp >= 0xFFE0 and cp <= 0xFFE6) { return 2 }
+
+        // Supplemental CJK/emoji planes
+        if (cp >= 0x1F000 and cp <= 0x1F02F) { return 2 }  // Mahjong Tiles
+        if (cp >= 0x1F0A0 and cp <= 0x1F0FF) { return 2 }  // Playing Cards
+        if (cp >= 0x1F100 and cp <= 0x1F1FF) { return 2 }  // Enclosed Alphanumerics Supplement
+        if (cp >= 0x1F200 and cp <= 0x1F2FF) { return 2 }  // Enclosed Ideographic Supplement
+        if (cp >= 0x1F300 and cp <= 0x1F9FF) { return 2 }  // Misc Symbols/Pictographs, Emoticons, Transport, Supplemental
+        if (cp >= 0x1FA00 and cp <= 0x1FA6F) { return 2 }  // Chess Symbols
+        if (cp >= 0x1FA70 and cp <= 0x1FAFF) { return 2 }  // Symbols and Pictographs Extended-A
+
+        // CJK Unified Ideographs Extension B through G
+        if (cp >= 0x20000 and cp <= 0x2FA1F) { return 2 }
+        if (cp >= 0x30000 and cp <= 0x3134F) { return 2 }
+
+        return 1
+    }
+
     // -- Character output ---------------------------------------------------
 
     /// Write a character at the cursor position with current SGR attributes.
     /// Wrapping is deferred: reaching the last column sets pending_wrap,
     /// and the actual wrap (CR + LF) happens on the next printable character.
+    /// Clear the partner cell when overwriting one half of a wide character pair.
+    fn clearWidePartner(row: i64, col: i64) void {
+        const f = self.grid.getCell(row, col).flags
+        if ((f & CELL_WIDE) != 0 and col + 1 < self.grid.cols) {
+            // Overwriting left half: clear the spacer
+            const spacer = self.grid.getCell(row, col + 1)
+            spacer.codepoint = ' '
+            spacer.flags = spacer.flags & ~(CELL_SPACER | CELL_WIDE)
+        }
+        if ((f & CELL_SPACER) != 0 and col > 0) {
+            // Overwriting right half: clear the wide char
+            const wide = self.grid.getCell(row, col - 1)
+            wide.codepoint = ' '
+            wide.flags = wide.flags & ~(CELL_WIDE | CELL_SPACER)
+        }
+    }
+
     fn putChar(cp: i64) void {
         // Apply charset mapping (DEC Special Graphics, UK, etc.)
         var mapped = cp
@@ -822,6 +901,8 @@ struct TerminalState {
             mapped = ukCharsetMap(mapped)
         }
 
+        const width = TerminalState.charWidth(mapped)
+
         if (self.pending_wrap) {
             if (self.mode_wraparound) {
                 self.grid.setRowWrap(self.cursor_row, 1)
@@ -839,12 +920,40 @@ struct TerminalState {
             }
         }
 
+        // Wide char at last column: can't fit both cells.
+        // Clear the last column and wrap to next line first.
+        if (width == 2 and self.cursor_col >= self.grid.cols - 1) {
+            // Clear last column
+            self.clearWidePartner(self.cursor_row, self.cursor_col)
+            const last = self.grid.getCell(self.cursor_row, self.cursor_col)
+            last.codepoint = ' '
+            last.flags = 0
+            last.fg_type = COLOR_NONE
+            last.fg_val = 0
+            last.bg_type = self.bg_type
+            last.bg_val = self.bg_val
+            // Wrap
+            if (self.mode_wraparound) {
+                self.grid.setRowWrap(self.cursor_row, 1)
+                self.cursor_col = 0
+                self.cursor_row += 1
+                if (self.cursor_row > self.scroll_bottom) {
+                    var blank = self.blankCell()
+                    self.grid.scrollUp(self.scroll_top, self.scroll_bottom, &blank)
+                    self.cursor_row = self.scroll_bottom
+                }
+            }
+        }
+
         // Insert mode (IRM): shift existing content right before writing
         if (self.mode_insert) {
             if (self.cursor_col < self.grid.cols - 1) {
                 self.insertBlanks(1)
             }
         }
+
+        // Clear any existing wide char pair that we're overwriting
+        self.clearWidePartner(self.cursor_row, self.cursor_col)
 
         const c = self.grid.getCell(self.cursor_row, self.cursor_col)
         c.codepoint = mapped
@@ -873,12 +982,40 @@ struct TerminalState {
         c.ul_val = self.ul_val
         if (self.ul_type != COLOR_NONE) { c.flags = c.flags | CELL_CUSTOM_UL_COLOR }
 
+        // Wide character: mark left half and write spacer
+        if (width == 2) {
+            c.flags = c.flags | CELL_WIDE
+            if (self.cursor_col + 1 < self.grid.cols) {
+                // Clear any wide pair at the spacer position
+                self.clearWidePartner(self.cursor_row, self.cursor_col + 1)
+                const spacer = self.grid.getCell(self.cursor_row, self.cursor_col + 1)
+                spacer.codepoint = 0
+                spacer.fg_type = c.fg_type
+                spacer.fg_val = c.fg_val
+                spacer.bg_type = c.bg_type
+                spacer.bg_val = c.bg_val
+                spacer.flags = CELL_SPACER
+                spacer.ul_type = COLOR_NONE
+                spacer.ul_val = 0
+            }
+        }
+
         self.previous_char = mapped
 
-        if (self.cursor_col >= self.grid.cols - 1) {
-            self.pending_wrap = true
+        // Advance cursor: wide chars advance by 2
+        if (width == 2) {
+            if (self.cursor_col + 1 >= self.grid.cols - 1) {
+                self.cursor_col = self.grid.cols - 1
+                self.pending_wrap = true
+            } else {
+                self.cursor_col += 2
+            }
         } else {
-            self.cursor_col += 1
+            if (self.cursor_col >= self.grid.cols - 1) {
+                self.pending_wrap = true
+            } else {
+                self.cursor_col += 1
+            }
         }
     }
 
@@ -3139,6 +3276,46 @@ test "putChar basic" {
     @assertEq(t.cursor_col, 2)
     @assertEq(t.grid.getCell(0, 0).codepoint, 'H')
     @assertEq(t.grid.getCell(0, 1).codepoint, 'i')
+}
+
+test "putChar wide char occupies two cells" {
+    var t = TerminalState.init(24, 80)
+    // CJK character U+4E16 (世) — double-width
+    t.putChar(0x4E16)
+    @assertEq(t.cursor_col, 2)
+    @assertEq(t.grid.getCell(0, 0).codepoint, 0x4E16)
+    @assertEq(t.grid.getCell(0, 0).flags & CELL_WIDE, CELL_WIDE)
+    @assertEq(t.grid.getCell(0, 1).flags & CELL_SPACER, CELL_SPACER)
+    @assertEq(t.grid.getCell(0, 1).codepoint, 0)
+}
+
+test "putChar wide char at last column wraps" {
+    var t = TerminalState.init(3, 5)
+    // Move cursor to last column (col 4)
+    t.cursor_col = 4
+    // Write a wide char — can't fit, should wrap to next line
+    t.putChar(0x4E16)
+    @assertEq(t.cursor_row, 1)
+    @assertEq(t.cursor_col, 2)
+    @assertEq(t.grid.getCell(1, 0).codepoint, 0x4E16)
+    @assertEq(t.grid.getCell(1, 0).flags & CELL_WIDE, CELL_WIDE)
+    @assertEq(t.grid.getCell(1, 1).flags & CELL_SPACER, CELL_SPACER)
+}
+
+test "charWidth ASCII is 1" {
+    @assertEq(TerminalState.charWidth('A'), 1)
+    @assertEq(TerminalState.charWidth(' '), 1)
+}
+
+test "charWidth CJK is 2" {
+    @assertEq(TerminalState.charWidth(0x4E16), 2)  // 世
+    @assertEq(TerminalState.charWidth(0x3042), 2)  // あ (Hiragana)
+    @assertEq(TerminalState.charWidth(0xAC00), 2)  // 가 (Hangul)
+}
+
+test "charWidth emoji is 2" {
+    @assertEq(TerminalState.charWidth(0x1F600), 2)  // 😀
+    @assertEq(TerminalState.charWidth(0x1F4A9), 2)  // 💩
 }
 
 test "putChar applies SGR attributes" {

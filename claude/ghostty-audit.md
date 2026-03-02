@@ -18,8 +18,9 @@ Conducted 2026-03-02.
 - Fixed: Added `blankCell()`, threaded blank cell through all erase/scroll/insert/delete operations
 
 ### 3. No wide character support (CJK, emoji)
-- [ ] No `wide` field on Cell, no spacer_head/spacer_tail, no double-width handling in `putChar`. Every CJK character and wide emoji renders at 1-column width, corrupting the grid.
+- [x] No `wide` field on Cell, no spacer_head/spacer_tail, no double-width handling in `putChar`. Every CJK character and wide emoji renders at 1-column width, corrupting the grid.
 - Ghostty ref: `Page.Cell.wide` enum: narrow/wide/spacer_tail/spacer_head
+- Fixed: CELL_WIDE/CELL_SPACER flags, charWidth() with full East Asian Width tables, putChar handles wide chars (2-cell, wrap at edge, clear partner), renderer draws wide glyphs at 2x cell width
 
 ### 4. TERM/COLORTERM/TERM_PROGRAM not injected into child env
 - [x] When launched from Finder, `TERM` may be unset. Must inject `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=cotty`.
