@@ -4,6 +4,7 @@
 import "std/sys"
 import "std/process"
 import "std/mem"
+import "std/string"
 import "config"
 
 /// Unpack the master fd from openpty()/pipe() packed result.
@@ -19,7 +20,7 @@ fn slaveFd(fds: i64) i64 {
 /// Check if an env var entry (raw bytes) starts with a given prefix.
 /// Used to filter inherited env vars like TERM=, COLORTERM=, etc.
 fn envHasPrefix(ptr: i64, len: i64, prefix: string) bool {
-    return startsWith(ptr, len, @ptrOf(prefix), @lenOf(prefix))
+    return startsWith(@string(ptr, len), prefix)
 }
 
 /// Check if an env var should be excluded (we're overriding it).
@@ -30,13 +31,12 @@ fn isOverriddenEnvVar(ptr: i64, len: i64) bool {
     return false
 }
 
-/// Copy a string literal into a buffer as a null-terminated C string.
+/// Copy a string into a buffer as a null-terminated C string.
 /// Returns pointer to the allocated C string.
 fn allocCString(s: string) i64 {
-    const len = @lenOf(s)
-    const buf = alloc(0, len + 1)
-    memcpy(buf, @ptrOf(s), len)
-    @intToPtr(*u8, buf + len).* = @intCast(u8, 0)
+    const buf = alloc(0, s.len + 1)
+    memcpy(buf, @ptrOf(s), s.len)
+    @intToPtr(*u8, buf + s.len).* = @intCast(u8, 0)
     return buf
 }
 
@@ -161,7 +161,7 @@ struct Pty {
 
     /// Write a string to the PTY master (sends input to the shell).
     fn writeBytes(data: string) i64 {
-        return fd_write(self.master_fd, @ptrOf(data), @lenOf(data))
+        return fd_write(self.master_fd, @ptrOf(data), data.len)
     }
 
     /// Read up to len bytes from the PTY master into buf.

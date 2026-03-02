@@ -10,8 +10,7 @@ import "command_palette"
 
 /// A single theme entry with all color values.
 struct ThemeEntry {
-    name_ptr: i64,
-    name_len: i64,
+    name: string,
     bg_r: i64, bg_g: i64, bg_b: i64,
     fg_r: i64, fg_g: i64, fg_b: i64,
     cursor_r: i64, cursor_g: i64, cursor_b: i64,
@@ -66,12 +65,11 @@ struct ThemePalette {
         self.selected = 0
     }
 
-    /// Set the query from raw bytes and re-filter.
-    fn setQuery(ptr: *u8, len: i64) void {
+    /// Set the query from a string and re-filter.
+    fn setQuery(q: string) void {
         self.query.count = 0
-        for i in 0..len {
-            const b = @intToPtr(*u8, @ptrToInt(ptr) + i).*
-            self.query.append(b)
+        for i in 0..q.len {
+            self.query.append(q[i])
         }
         self.selected = 0
         self.filter()
@@ -90,7 +88,7 @@ struct ThemePalette {
 
         for i in 0..self.themes.count {
             const entry = self.themes.get(i)
-            if (substringMatch(entry.name_ptr, entry.name_len, self.query.items, self.query.count)) {
+            if (substringMatch(entry.name, @string(self.query.items, self.query.count))) {
                 self.filtered.append(i)
             }
         }
@@ -105,14 +103,14 @@ struct ThemePalette {
     fn resultTitle(index: i64) i64 {
         if (index < 0 or index >= self.filtered.count) { return 0 }
         const theme_idx = self.filtered.get(index)
-        return self.themes.get(theme_idx).name_ptr
+        return @ptrOf(self.themes.get(theme_idx).name)
     }
 
     /// Return the title length for a filtered result.
     fn resultTitleLen(index: i64) i64 {
         if (index < 0 or index >= self.filtered.count) { return 0 }
         const theme_idx = self.filtered.get(index)
-        return self.themes.get(theme_idx).name_len
+        return self.themes.get(theme_idx).name.len
     }
 
     /// Return the theme entry at the given filtered index.
@@ -168,9 +166,8 @@ fn applyThemeToConfig(entry: ThemeEntry, cfg: *Config) void {
 fn monokaiRemastered() ThemeEntry {
     var palette: List(i64) = .{}
     appendPaletteDefaults(palette)
-    const name = "Monokai Remastered"
     return ThemeEntry {
-        name_ptr: @ptrOf(name), name_len: @lenOf(name),
+        name: "Monokai Remastered",
         bg_r: 12, bg_g: 12, bg_b: 12,
         fg_r: 217, fg_g: 217, fg_b: 217,
         cursor_r: 252, cursor_g: 151, cursor_b: 31,
@@ -247,9 +244,8 @@ fn catppuccinMocha() ThemeEntry {
     palette.append(166)
     palette.append(173)
     palette.append(200)
-    const name = "Catppuccin Mocha"
     return ThemeEntry {
-        name_ptr: @ptrOf(name), name_len: @lenOf(name),
+        name: "Catppuccin Mocha",
         bg_r: 30, bg_g: 30, bg_b: 46,
         fg_r: 205, fg_g: 214, fg_b: 244,
         cursor_r: 245, cursor_g: 224, cursor_b: 220,
@@ -290,8 +286,7 @@ test "theme palette filter by query" {
     tp.addTheme(catppuccinMocha())
     tp.active = true
 
-    const q = "cat"
-    tp.setQuery(@intToPtr(*u8, @ptrOf(q)), @lenOf(q))
+    tp.setQuery("cat")
     @assertEq(tp.filtered.count, 1)
     @assertEq(tp.resultTitleLen(0), 16) // "Catppuccin Mocha"
 }

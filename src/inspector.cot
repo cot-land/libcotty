@@ -449,7 +449,7 @@ struct Inspector {
         if (terminal.blink) { sb7.append("blink ") }
         if (terminal.hidden) { sb7.append("hidden ") }
         if (terminal.overline) { sb7.append("overline ") }
-        if (@lenOf(sb7.toString()) == 0) { sb7.append("(none)") }
+        if (sb7.toString().len == 0) { sb7.append("(none)") }
         self.writeStr(row, label_col + 2, sb7.toString(), 200, 200, 200)
         row += 2
 
@@ -705,14 +705,14 @@ struct Inspector {
 
     fn writeStr(row: i64, col: i64, s: string, r: i64, g: i64, b: i64) i64 {
         if (row < 0 or row >= self.rows) { return col }
-        for i in 0..@lenOf(s) {
+        for i in 0..s.len {
             if (col + i >= self.cols) { return col + i }
             const c = self.grid.getCell(row, col + i)
-            c.codepoint = @intToPtr(*u8, @ptrOf(s) + i).*
+            c.codepoint = s[i]
             c.fg_type = COLOR_RGB
             c.fg_val = packRgb(r, g, b)
         }
-        return col + @lenOf(s)
+        return col + s.len
     }
 
     fn writeColorSwatch(row: i64, col: i64, r: i64, g: i64, b: i64) void {

@@ -5,6 +5,7 @@
 import "std/list"
 import "std/sys"
 import "std/string"
+import "std/path"
 import "app"
 import "surface"
 /// A single tab in the workspace. Each tab owns a Surface pointer.
@@ -210,43 +211,23 @@ struct Workspace {
                     self.title_buf.append(b)
                 }
             } else {
-                // Default "Terminal"
-                self.title_buf.append('T')
-                self.title_buf.append('e')
-                self.title_buf.append('r')
-                self.title_buf.append('m')
-                self.title_buf.append('i')
-                self.title_buf.append('n')
-                self.title_buf.append('a')
-                self.title_buf.append('l')
+                const default_title = "Terminal"
+                for i in 0..default_title.len {
+                    self.title_buf.append(default_title[i])
+                }
             }
         } else {
             // Editor: use filepath last component or "Untitled"
             if (tab.surface.filepath) |path| {
-                // Find last '/' and take everything after it
-                var last_slash: i64 = -1
-                const path_ptr = @ptrOf(path)
-                const path_len = @lenOf(path)
-                for i in 0..path_len {
-                    if (@intToPtr(*u8, path_ptr + i).* == '/') {
-                        last_slash = i
-                    }
-                }
-                const start = last_slash + 1
-                const len = path_len - start
-                for i in 0..len {
-                    self.title_buf.append(@intToPtr(*u8, path_ptr + start + i).*)
+                const name = basename(path)
+                for i in 0..name.len {
+                    self.title_buf.append(name[i])
                 }
             } else {
-                // "Untitled"
-                self.title_buf.append('U')
-                self.title_buf.append('n')
-                self.title_buf.append('t')
-                self.title_buf.append('i')
-                self.title_buf.append('t')
-                self.title_buf.append('l')
-                self.title_buf.append('e')
-                self.title_buf.append('d')
+                const default_title = "Untitled"
+                for i in 0..default_title.len {
+                    self.title_buf.append(default_title[i])
+                }
             }
         }
 

@@ -194,8 +194,8 @@ struct VtParser {
 
     /// Feed each byte of a string through the parser.
     fn feedBytes(terminal: *TerminalState, data: string) void {
-        for i in 0..@lenOf(data) {
-            self.feed(terminal, charAt(data, i))
+        for i in 0..data.len {
+            self.feed(terminal, data[i])
         }
     }
 
@@ -665,8 +665,8 @@ struct VtParser {
         writeStr(terminal.pty_fd, "=")
         // Hex-encode the value
         var k: i64 = 0
-        while (k < @lenOf(value)) {
-            const ch = charAt(value, k)
+        while (k < value.len) {
+            const ch = value[k]
             const hi = (ch >> 4) & 0x0F
             const lo = ch & 0x0F
             if (hi < 10) { writeByte(terminal.pty_fd, '0' + hi) } else { writeByte(terminal.pty_fd, 'a' + hi - 10) }

@@ -2199,25 +2199,7 @@ struct TerminalState {
 
     /// Write a decimal integer to an fd as ASCII digits.
     fn writeDecimal(fd: i64, val: i64) void {
-        if (val == 0) {
-            writeByte(fd, '0')
-            return
-        }
-        // Stack digits (max 5 digits for terminal coords)
-        var digits: i64 = 0
-        var count: i64 = 0
-        var v = val
-        while (v > 0) {
-            digits = digits * 10 + (v % 10)
-            count += 1
-            v = v / 10
-        }
-        // Write digits in correct order
-        while (count > 0) {
-            writeByte(fd, '0' + (digits % 10))
-            digits = digits / 10
-            count -= 1
-        }
+        writeDecimalFree(fd, val)
     }
 
     // -- Resize -------------------------------------------------------------
@@ -2880,12 +2862,12 @@ fn captureEnd() List(i64) {
 fn writeStr(fd: i64, s: string) void {
     if (g_capture_active) {
         var i: i64 = 0
-        while (i < @lenOf(s)) {
-            g_capture_bytes.append(@intToPtr(*u8, @ptrOf(s) + i).*)
+        while (i < s.len) {
+            g_capture_bytes.append(s[i])
             i += 1
         }
     }
-    fd_write(fd, @ptrOf(s), @lenOf(s))
+    fd_write(fd, @ptrOf(s), s.len)
 }
 
 /// Write a single byte to an fd.
@@ -4104,10 +4086,10 @@ fn captureKittyKey(key: i64, mods: i64, flags: i64, event_type: i64) List(i64) {
 
 /// Helper: compare captured bytes with expected string.
 fn capturedEquals(bytes: List(i64), expected: string) bool {
-    if (bytes.count != @lenOf(expected)) { return false }
+    if (bytes.count != expected.len) { return false }
     var i: i64 = 0
     while (i < bytes.count) {
-        if (bytes.get(i) != @intToPtr(*u8, @ptrOf(expected) + i).*) { return false }
+        if (bytes.get(i) != expected[i]) { return false }
         i += 1
     }
     return true

@@ -76,7 +76,7 @@ struct FileTree {
         for i in 0..names.count {
             const name = names.get(i)
             // Skip hidden files (starting with '.')
-            if (@lenOf(name) > 0 and charAt(name, 0) == '.') { continue }
+            if (name.len > 0 and name[0] == '.') { continue }
             const full = join(self.root_path, name)
             const entry = FileEntry {
                 name: name,
@@ -129,7 +129,7 @@ struct FileTree {
         for i in 0..names.count {
             const name = names.get(i)
             // Skip hidden files
-            if (@lenOf(name) > 0 and charAt(name, 0) == '.') { continue }
+            if (name.len > 0 and name[0] == '.') { continue }
             const full = join(parent_full_path, name)
             const entry = FileEntry {
                 name: name,
@@ -218,13 +218,11 @@ struct FileTree {
         if (row < 0 or row >= self.visible_rows.count) { return 0 }
         const entry = self.entries.get(self.visible_rows.get(row))
         const name = entry.name
-        const len = @lenOf(name)
-        const ptr = @ptrOf(name)
         self.name_buf.count = 0
-        for i in 0..len {
-            self.name_buf.append(@intToPtr(*u8, ptr + i).*)
+        for i in 0..name.len {
+            self.name_buf.append(name[i])
         }
-        return len
+        return name.len
     }
 
     /// Return the depth of the entry at visible row.
@@ -252,13 +250,11 @@ struct FileTree {
         if (row < 0 or row >= self.visible_rows.count) { return 0 }
         const entry = self.entries.get(self.visible_rows.get(row))
         const path = entry.full_path
-        const len = @lenOf(path)
-        const ptr = @ptrOf(path)
         self.path_buf.count = 0
-        for i in 0..len {
-            self.path_buf.append(@intToPtr(*u8, ptr + i).*)
+        for i in 0..path.len {
+            self.path_buf.append(path[i])
         }
-        return len
+        return path.len
     }
 
     /// Change root path, clear all state, reload.

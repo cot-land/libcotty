@@ -114,7 +114,7 @@ fn currentSplitTreeForWs(wptr: *Workspace) *SplitTree {
 export fn cotty_app_new() i64 {
     g_app = App.init()
     const path = configPath()
-    if (@lenOf(path) > 0) {
+    if (path.len > 0) {
         g_app.config = Config.loadFromFile(path)
     }
     initThemeDefaults(g_app.config)
@@ -694,7 +694,7 @@ export fn cotty_config_font_name() i64 {
 
 /// Return the byte length of the font name string.
 export fn cotty_config_font_name_len() i64 {
-    return @lenOf(g_app.config.font_name)
+    return g_app.config.font_name.len
 }
 
 /// Return the configured font size.
@@ -709,7 +709,7 @@ export fn cotty_config_ui_font_name() i64 {
 
 /// Return the byte length of the UI font name string.
 export fn cotty_config_ui_font_name_len() i64 {
-    return @lenOf(g_app.config.ui_font_name)
+    return g_app.config.ui_font_name.len
 }
 
 /// Return the configured UI font size.
@@ -1453,7 +1453,7 @@ export fn cotty_palette_dismiss() void {
 
 /// Set the query string from raw bytes and re-filter.
 export fn cotty_palette_set_query(ptr: *u8, len: i64) void {
-    g_palette.setQuery(ptr, len)
+    g_palette.setQuery(@string(@ptrToInt(ptr), len))
 }
 
 /// Return the number of filtered results.
@@ -1464,13 +1464,13 @@ export fn cotty_palette_result_count() i64 {
 /// Return a pointer to the title bytes of the result at index.
 export fn cotty_palette_result_title(index: i64) i64 {
     const action = g_palette.resultAction(index)
-    return action.title_ptr
+    return @ptrOf(action.title)
 }
 
 /// Return the byte length of the title at index.
 export fn cotty_palette_result_title_len(index: i64) i64 {
     const action = g_palette.resultAction(index)
-    return action.title_len
+    return action.title.len
 }
 
 /// Return the action tag of the result at index.
@@ -1516,7 +1516,7 @@ export fn cotty_theme_dismiss() void {
 
 /// Set the query string from raw bytes and re-filter.
 export fn cotty_theme_set_query(ptr: *u8, len: i64) void {
-    g_theme_palette.setQuery(ptr, len)
+    g_theme_palette.setQuery(@string(@ptrToInt(ptr), len))
 }
 
 /// Return the number of filtered results.

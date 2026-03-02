@@ -38,9 +38,8 @@ struct Buffer {
     /// Create a buffer initialized with content.
     static fn initWithContent(content: string) Buffer {
         var buf = Buffer.init()
-        const content_len = @lenOf(content)
-        for i in 0..content_len {
-            buf.insert(charAt(content, i))
+        for i in 0..content.len {
+            buf.insert(content[i])
         }
         return buf
     }

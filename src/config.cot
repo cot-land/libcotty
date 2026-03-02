@@ -218,7 +218,7 @@ struct Config {
 
 /// Parse a "#RRGGBB" hex color string into (r, g, b) components.
 fn parseHexColor(s: string) (i64, i64, i64) {
-    if (@lenOf(s) != 7) { return (0, 0, 0) }
+    if (s.len != 7) { return (0, 0, 0) }
     if (charAt(s, 0) != '#') { return (0, 0, 0) }
     const r = hexDigit(charAt(s, 1)) * 16 + hexDigit(charAt(s, 2))
     const g = hexDigit(charAt(s, 3)) * 16 + hexDigit(charAt(s, 4))
@@ -233,12 +233,11 @@ fn parseHexColor(s: string) (i64, i64, i64) {
 /// Find an environment variable by key name. Returns "" if not found.
 fn findEnvValue(key: string) string {
     const count = environCount()
-    const key_len = @lenOf(key)
     for i in 0..count {
         const e = env(i)
-        if (@lenOf(e) > key_len) {
-            if (substring(e, 0, key_len) == key and charAt(e, key_len) == '=') {
-                return substring(e, key_len + 1, @lenOf(e))
+        if (e.len > key.len) {
+            if (substring(e, 0, key.len) == key and e[key.len] == '=') {
+                return substring(e, key.len + 1, e.len)
             }
         }
     }
@@ -248,7 +247,7 @@ fn findEnvValue(key: string) string {
 /// Build the default config file path: ~/.config/cotty/config.json
 fn configPath() string {
     const home = findEnvValue("HOME")
-    if (@lenOf(home) == 0) { return "" }
+    if (home.len == 0) { return "" }
     var sb: StringBuilder = .{}
     sb.append(home)
     sb.append("/.config/cotty/config.json")
@@ -362,7 +361,7 @@ fn saveToFile(cfg: *Config, path: string) void {
     sb.append("  \"font-size\": ")
     sb.appendInt(cfg.font_size)
     sb.append(",\n")
-    if (@lenOf(cfg.ui_font_name) > 0) {
+    if (cfg.ui_font_name.len > 0) {
         sb.append("  \"ui-font-family\": \"")
         sb.append(cfg.ui_font_name)
         sb.append("\",\n")

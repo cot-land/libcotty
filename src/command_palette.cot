@@ -7,8 +7,7 @@ import "std/string"
 
 /// A single action in the palette.
 struct PaletteAction {
-    title_ptr: i64,
-    title_len: i64,
+    title: string,
     tag: i64,
 }
 
@@ -38,8 +37,7 @@ struct CommandPalette {
     /// Register an action with a string title and integer tag.
     fn addAction(title: string, tag: i64) void {
         const action = PaletteAction {
-            title_ptr: @ptrOf(title),
-            title_len: @lenOf(title),
+            title: title,
             tag: tag,
         }
         self.actions.append(action)
@@ -64,12 +62,11 @@ struct CommandPalette {
         self.selected = 0
     }
 
-    /// Set the query from raw bytes and re-filter.
-    fn setQuery(ptr: *u8, len: i64) void {
+    /// Set the query from a string and re-filter.
+    fn setQuery(q: string) void {
         self.query.count = 0
-        for i in 0..len {
-            const b = @intToPtr(*u8, @ptrToInt(ptr) + i).*
-            self.query.append(b)
+        for i in 0..q.len {
+            self.query.append(q[i])
         }
         self.selected = 0
         self.filter()
@@ -89,7 +86,7 @@ struct CommandPalette {
 
         for i in 0..self.actions.count {
             const action = self.actions.get(i)
-            if (substringMatch(action.title_ptr, action.title_len, self.query.items, self.query.count)) {
+            if (substringMatch(action.title, @string(self.query.items, self.query.count))) {
                 self.filtered.append(i)
             }
         }
@@ -103,7 +100,7 @@ struct CommandPalette {
     /// Return the action at the given filtered index.
     fn resultAction(index: i64) PaletteAction {
         if (index < 0 or index >= self.filtered.count) {
-            return PaletteAction { title_ptr: 0, title_len: 0, tag: 0 }
+            return PaletteAction { title: "", tag: 0 }
         }
         const action_idx = self.filtered.get(index)
         return self.actions.get(action_idx)
@@ -125,16 +122,16 @@ struct CommandPalette {
 }
 
 /// Case-insensitive substring match: does needle appear in haystack?
-fn substringMatch(hay_ptr: i64, hay_len: i64, needle_ptr: i64, needle_len: i64) bool {
-    if (needle_len == 0) { return true }
-    if (needle_len > hay_len) { return false }
+fn substringMatch(haystack: string, needle: string) bool {
+    if (needle.len == 0) { return true }
+    if (needle.len > haystack.len) { return false }
 
-    const limit = hay_len - needle_len + 1
+    const limit = haystack.len - needle.len + 1
     for i in 0..limit {
         var matched = true
-        for j in 0..needle_len {
-            const hc = asciiToLower(@intToPtr(*u8, hay_ptr + i + j).*)
-            const nc = asciiToLower(@intToPtr(*u8, needle_ptr + j).*)
+        for j in 0..needle.len {
+            const hc = asciiToLower(haystack[i + j])
+            const nc = asciiToLower(needle[j])
             if (hc != nc) {
                 matched = false
                 break
@@ -187,15 +184,11 @@ test "command palette filter" {
 }
 
 test "substring match case insensitive" {
-    const hay = "New Terminal"
-    const needle = "term"
-    @assertEq(substringMatch(@ptrOf(hay), @lenOf(hay), @ptrOf(needle), @lenOf(needle)), true)
+    @assertEq(substringMatch("New Terminal", "term"), true)
 }
 
 test "substring match no match" {
-    const hay = "New Window"
-    const needle = "term"
-    @assertEq(substringMatch(@ptrOf(hay), @lenOf(hay), @ptrOf(needle), @lenOf(needle)), false)
+    @assertEq(substringMatch("New Window", "term"), false)
 }
 
 test "asciiToLower" {
