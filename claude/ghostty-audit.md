@@ -172,5 +172,5 @@ Conducted 2026-03-02.
 - [x] 46. No bare `CSI u` for xterm restore-cursor — Added SCORC (CSI u) and SCOSC (CSI s) for xterm cursor save/restore
 - [x] 47. ANSI modes 2 (KAM), 12 (SRM) — Added `mode_keyboard_action` and `mode_send_receive` to setAnsiMode
 - [x] 48. DECSCA / SPA/EPA (cell protection) — `protected_mode` field (0=off, 1=DEC, 2=ISO). CSI " q (DECSCA), ESC V (SPA), ESC W (EPA). CELL_PROTECTED flag set on cells written while protected.
-- [ ] 49. OSC 9, OSC 1337, OSC 22
+- [x] 49. OSC 9, OSC 1337, OSC 22 — OSC 9 triggers bell, OSC 22 parsed (mouse cursor shape, no-op), OSC 1337 CurrentDir=path sets pwd via oscBufEql helper
 - [x] 50. Copy-on-select — automatically copies selection to clipboard on mouseUp

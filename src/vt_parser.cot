@@ -1271,7 +1271,48 @@ struct VtParser {
             if (payload_len > 0) {
                 terminal.handleSemanticPrompt(self.osc_buf.get(payload_start))
             }
+        } else if (cmd == 9) {
+            // OSC 9 — iTerm2 notification / ConEmu extensions
+            // For now, trigger bell to notify user. Could extend for ConEmu subcommands.
+            terminal.bell_pending = true
+        } else if (cmd == 22) {
+            // OSC 22 — Set mouse cursor shape (W3C CSS cursor names)
+            // Parsed and ignored for now — could set NSCursor via FFI.
+        } else if (cmd == 1337) {
+            // OSC 1337 — iTerm2 custom protocol (key=value format)
+            // Find '=' separator in payload
+            var eq_pos: i64 = -1
+            var k: i64 = payload_start
+            while (k < self.osc_buf.count) {
+                if (self.osc_buf.get(k) == '=') {
+                    eq_pos = k
+                    break
+                }
+                k += 1
+            }
+            if (eq_pos > payload_start) {
+                const key_len = eq_pos - payload_start
+                if (self.oscBufEql(payload_start, key_len, "CurrentDir")) {
+                    const val_start = eq_pos + 1
+                    const val_len = self.osc_buf.count - val_start
+                    if (val_len > 0) {
+                        terminal.setPwd(self.osc_buf, val_start, val_len)
+                    }
+                }
+            }
         }
+    }
+
+    /// Compare osc_buf[start..start+len] against a string literal.
+    /// Reference: Ghostty iterm2.zig uses StaticStringMap with eqlIgnoreCase.
+    fn oscBufEql(start: i64, len: i64, expected: string) bool {
+        if (len != expected.len) { return false }
+        var i: i64 = 0
+        while (i < len) {
+            if (self.osc_buf.get(start + i) != expected[i]) { return false }
+            i += 1
+        }
+        return true
     }
 
     /// Handle OSC 4 — set/query palette color entry.
