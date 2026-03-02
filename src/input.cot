@@ -83,6 +83,30 @@ const KEY_F10: int = 273
 const KEY_F11: int = 274
 const KEY_F12: int = 275
 const KEY_INSERT: int = 276
+const KEY_F13: int = 277
+const KEY_F14: int = 278
+const KEY_F15: int = 279
+const KEY_F16: int = 280
+const KEY_F17: int = 281
+const KEY_F18: int = 282
+const KEY_F19: int = 283
+const KEY_F20: int = 284
+const KEY_KP_ENTER: int = 285
+const KEY_KP_0: int = 286
+const KEY_KP_1: int = 287
+const KEY_KP_2: int = 288
+const KEY_KP_3: int = 289
+const KEY_KP_4: int = 290
+const KEY_KP_5: int = 291
+const KEY_KP_6: int = 292
+const KEY_KP_7: int = 293
+const KEY_KP_8: int = 294
+const KEY_KP_9: int = 295
+const KEY_KP_DECIMAL: int = 296
+const KEY_KP_MULTIPLY: int = 297
+const KEY_KP_PLUS: int = 298
+const KEY_KP_DIVIDE: int = 299
+const KEY_KP_MINUS: int = 300
 
 /// Map a key event to an editor action.
 fn keyToAction(event: KeyEvent) InputAction {

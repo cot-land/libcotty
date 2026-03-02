@@ -587,6 +587,8 @@ struct TerminalState {
     mode_linefeed_newline: bool,
     mode_report_color_scheme: bool,
     mode_modify_other_keys: i64,
+    mode_keyboard_action: bool,
+    mode_send_receive: bool,
 
     // XTSAVE/XTRESTORE — saved DEC private mode state (CSI ? s / CSI ? r)
     // Ghostty ref: modes.zig ModeState — parallel saved bitfield
@@ -755,6 +757,8 @@ struct TerminalState {
             mode_linefeed_newline: false,
             mode_report_color_scheme: false,
             mode_modify_other_keys: 0,
+            mode_keyboard_action: false,
+            mode_send_receive: false,
             xtsaved_app_cursor: false,
             xtsaved_origin: false,
             xtsaved_wraparound: true,
@@ -845,7 +849,13 @@ struct TerminalState {
         const c = self.grid.getCell(self.cursor_row, self.cursor_col)
         c.codepoint = mapped
         c.fg_type = self.fg_type
-        c.fg_val = self.fg_val
+        // Bold-as-bright: palette indices 0-7 shift to 8-15 when bold
+        // Ghostty ref: style.zig:145-189 — applies at render time, we apply at cell write
+        if (self.bold and self.fg_type == COLOR_PALETTE and self.fg_val < 8) {
+            c.fg_val = self.fg_val + 8
+        } else {
+            c.fg_val = self.fg_val
+        }
         c.bg_type = self.bg_type
         c.bg_val = self.bg_val
         c.flags = 0
@@ -1633,7 +1643,9 @@ struct TerminalState {
     /// Set or reset a standard ANSI mode (CSI h/l without ? prefix).
     fn setAnsiMode(mode: i64, enable: bool) void {
         switch (mode) {
+            2 => { self.mode_keyboard_action = enable },
             4 => { self.mode_insert = enable },
+            12 => { self.mode_send_receive = enable },
             20 => { self.mode_linefeed_newline = enable },
             else => {},
         }
@@ -2825,6 +2837,44 @@ fn keyToTerminalBytes(fd: i64, key: i64, mods: i64, app_cursor: bool) void {
         return
     }
 
+    // Function keys F13-F20 (tilde encoding)
+    // F13=25, F14=26, F15=28, F16=29, F17=31, F18=32, F19=33, F20=34
+    if (key >= KEY_F13 and key <= KEY_F20) {
+        var num: i64 = 25
+        if (key == KEY_F14) { num = 26 }
+        if (key == KEY_F15) { num = 28 }
+        if (key == KEY_F16) { num = 29 }
+        if (key == KEY_F17) { num = 31 }
+        if (key == KEY_F18) { num = 32 }
+        if (key == KEY_F19) { num = 33 }
+        if (key == KEY_F20) { num = 34 }
+
+        if (has_mods) {
+            writeStr(fd, "\x1b[")
+            writeDecimalFree(fd, num)
+            writeStr(fd, ";")
+            writeDecimalFree(fd, mod_param)
+            writeStr(fd, "~")
+        } else {
+            writeStr(fd, "\x1b[")
+            writeDecimalFree(fd, num)
+            writeStr(fd, "~")
+        }
+        return
+    }
+
+    // Numpad keys — application keypad mode sends SS3 codes, normal mode sends characters
+    if (key == KEY_KP_ENTER) { writeStr(fd, "\r"); return }
+    if (key >= KEY_KP_0 and key <= KEY_KP_9) {
+        writeByte(fd, '0' + (key - KEY_KP_0))
+        return
+    }
+    if (key == KEY_KP_DECIMAL) { writeByte(fd, '.'); return }
+    if (key == KEY_KP_MULTIPLY) { writeByte(fd, '*'); return }
+    if (key == KEY_KP_PLUS) { writeByte(fd, '+'); return }
+    if (key == KEY_KP_DIVIDE) { writeByte(fd, '/'); return }
+    if (key == KEY_KP_MINUS) { writeByte(fd, '-'); return }
+
     // Backspace/Enter/Tab/Escape — with modifier encoding
     // Ghostty ref: key_encode.zig — modified special keys use CSI code;mod ~
     if (key == KEY_BACKSPACE) {
@@ -2897,6 +2947,30 @@ fn kittyMapping(key: i64) (i64, i64) {
         KEY_DELETE => (3, '~'),
         KEY_PAGE_UP => (5, '~'),
         KEY_PAGE_DOWN => (6, '~'),
+        KEY_F13 => (25, '~'),
+        KEY_F14 => (26, '~'),
+        KEY_F15 => (28, '~'),
+        KEY_F16 => (29, '~'),
+        KEY_F17 => (31, '~'),
+        KEY_F18 => (32, '~'),
+        KEY_F19 => (33, '~'),
+        KEY_F20 => (34, '~'),
+        KEY_KP_ENTER => (57414, 'u'),
+        KEY_KP_0 => (57399, 'u'),
+        KEY_KP_1 => (57400, 'u'),
+        KEY_KP_2 => (57401, 'u'),
+        KEY_KP_3 => (57402, 'u'),
+        KEY_KP_4 => (57403, 'u'),
+        KEY_KP_5 => (57404, 'u'),
+        KEY_KP_6 => (57405, 'u'),
+        KEY_KP_7 => (57406, 'u'),
+        KEY_KP_8 => (57407, 'u'),
+        KEY_KP_9 => (57408, 'u'),
+        KEY_KP_DECIMAL => (57409, 'u'),
+        KEY_KP_DIVIDE => (57410, 'u'),
+        KEY_KP_MULTIPLY => (57411, 'u'),
+        KEY_KP_MINUS => (57412, 'u'),
+        KEY_KP_PLUS => (57413, 'u'),
         else => {
             // Printable ASCII uses 'u' final with the codepoint itself
             if (key >= 32 and key <= 126) {

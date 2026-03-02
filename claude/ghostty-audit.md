@@ -69,13 +69,16 @@ Conducted 2026-03-02.
 - Fixed: `handleInsertLines`/`handleDeleteLines` wrappers set cursor_col = 0
 
 ### 14. Colon-separated SGR sub-parameters entirely absent
-- [ ] No `4:3` (curly underline), no `38:2:r:g:b` (modern colon color format). Parser has no colon vs semicolon separator concept.
+- [x] No `4:3` (curly underline), no `38:2:r:g:b` (modern colon color format). Parser has no colon vs semicolon separator concept.
+- Fixed: Added `param_seps` list tracking colon vs semicolon separators. SGR 4:N underline styles, 38:2:R:G:B and 38:2:CS:R:G:B colon color format supported.
 
 ### 15. No underline/strikethrough/overline rendering
-- [ ] SGR flags parsed and stored but renderer draws nothing for text decorations. `CELL_HIDDEN` not checked.
+- [x] SGR flags parsed and stored but renderer draws nothing for text decorations. `CELL_HIDDEN` not checked.
+- Fixed: Metal renderer now draws underline, double underline, strikethrough, overline using solid glyph. CELL_HIDDEN suppresses foreground glyph. Custom underline color (ul_type/ul_val) supported.
 
 ### 16. Bold-as-bright logic is in Swift, not Cot
-- [ ] Per CLAUDE.md, all logic must be in Cot. Should move to terminal.cot or cell.cot.
+- [x] Per CLAUDE.md, all logic must be in Cot. Should move to terminal.cot or cell.cot.
+- Fixed: Moved to putChar() in terminal.cot — palette indices 0-7 shift to 8-15 when bold. Removed from MetalRenderer.swift.
 
 ### 17. Backspace/Enter/Tab with modifiers not encoded
 - [x] BS always \x7f, Enter always \r, Tab only shift. Missing alt+BS, ctrl+BS, ctrl+enter, alt+enter, ctrl+tab.
@@ -105,7 +108,8 @@ Conducted 2026-03-02.
 - Fixed: Added `mode_modify_other_keys` field, `>` intermediate handling in dispatchMode for CSI > 4 m/l
 
 ### 23. Super/Cmd never included in modifier parameter
-- [ ] Swift never passes Cmd in mods. Kitty mods also miss caps_lock, num_lock, hyper, meta.
+- [x] Swift never passes Cmd in mods. Kitty mods also miss caps_lock, num_lock, hyper, meta.
+- Fixed: Added `.command` → `MOD_SUPER` (8) in `translateKeyEvent`. Kitty encoder already includes super in mod param.
 
 ### 24. Kitty `report_alternates` and `report_associated` text not implemented
 - [ ] Flags 2 and 4 of Kitty keyboard protocol.
@@ -156,12 +160,12 @@ Conducted 2026-03-02.
 - [x] 39. ESC E (NEL — next line) — CR + index. Added to ESC dispatch.
 - [ ] 40. No emoji/color glyph atlas
 - [ ] 41. No per-row dirty tracking
-- [ ] 42. No mouse-hide-while-typing
+- [x] 42. Mouse-hide-while-typing — `NSCursor.setHiddenUntilMouseMoves(true)` in keyDown
 - [ ] 43. No minimum-contrast
 - [ ] 44. No background-opacity/transparency
-- [ ] 45. Numpad keys, F13-F25, modifier keys as events
+- [x] 45. F13-F20, numpad keys (KP 0-9, Enter, +, -, *, /, .) — constants, legacy tilde/char encoding, Kitty codepoints, Swift keyCode mapping
 - [x] 46. No bare `CSI u` for xterm restore-cursor — Added SCORC (CSI u) and SCOSC (CSI s) for xterm cursor save/restore
-- [ ] 47. ANSI modes 2 (KAM), 12 (SRM)
+- [x] 47. ANSI modes 2 (KAM), 12 (SRM) — Added `mode_keyboard_action` and `mode_send_receive` to setAnsiMode
 - [ ] 48. No DECSCA / SPA/EPA (cell protection)
 - [ ] 49. OSC 9, OSC 1337, OSC 22
 - [ ] 50. No copy-on-select
