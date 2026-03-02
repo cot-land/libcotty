@@ -272,6 +272,8 @@ libcotty: `vt_parser.cot` Ground state
 - [x] SI (0x0F) — shift in (G0)
 
 **Missing:**
+- [x] CAN (0x18) — cancel in-progress escape sequence, return to Ground
+- [x] SUB (0x1A) — cancel in-progress escape sequence, return to Ground
 - [x] ENQ (0x05) — return answerback message
 - [x] DEL (0x7F) — verified: parser ignores in ground state (test added)
 
@@ -632,11 +634,11 @@ libcotty: `workspace.cot`, `split.cot`, `file_tree.cot`, `command_palette.cot`, 
 | Phase | Total Items | Done | Remaining |
 |-------|------------|------|-----------|
 | 1 — Daily Driver | ~35 | ~34 | ~1 |
-| 2 — Correctness | ~78 | ~73 | ~5 |
+| 2 — Correctness | ~80 | ~77 | ~3 |
 | 3 — Modern Protocols | ~25 | ~16 | ~9 |
 | 4 — Config | ~15 | ~8 | ~7 |
-| 5 — Infrastructure | ~25 | ~4 | ~21 |
+| 5 — Infrastructure | ~25 | ~5 | ~20 |
 | 6 — App UI | ~38 | ~30 | ~8 |
-| **Total** | **~216** | **~165** | **~51** |
+| **Total** | **~218** | **~170** | **~48** |
 
-libcotty is at roughly **76% checkbox completion**. Phase 1 is effectively complete (only semantic selection remains). Phase 2 is nearly complete — all ESC/CSI/SGR sequences, character sets, and rendering correctness fixes (inverse, DIM, bold-as-bright, scale factor) are done; remaining gaps are text decoration rendering (underline, strikethrough, italic, bold fonts). Phase 3 includes OSC 133 semantic prompts and Kitty keyboard protocol. Phase 6 (App UI) is largely done — tabs, splits, file tree, command palette, theme selector, inspector, and font controls are all working. The biggest remaining gaps are Kitty graphics, hyperlinks, search, keybindings, Unicode width handling, and text decoration rendering.
+libcotty is at roughly **78% checkbox completion**. Phase 1 is effectively complete (only semantic selection remains). Phase 2 is nearly complete — all ESC/CSI/SGR sequences, character sets, CAN/SUB abort, LNM mode, erase scrollback, modifier key encoding, and rendering correctness fixes are done; remaining gaps are text decoration rendering (underline, strikethrough, italic, bold fonts) and colon-separated SGR sub-params. Phase 3 includes Kitty keyboard protocol (largely done) and OSC 133 semantic prompts. Phase 5 now includes VSync-driven rendering via CVDisplayLink. Phase 6 (App UI) is largely done. The biggest remaining gaps are Kitty graphics, hyperlinks, search, keybindings, Unicode width handling, and text decoration rendering.

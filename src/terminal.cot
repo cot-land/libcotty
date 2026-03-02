@@ -220,6 +220,29 @@ struct TerminalGrid {
 
     /// Trim scrollback when it exceeds max_scrollback rows.
     /// Moves remaining cells/wraps forward and adjusts active_start.
+    /// Erase all scrollback — keep only the active screen rows.
+    /// Shifts cells/wraps/semantics so active_start becomes 0.
+    fn eraseScrollback() void {
+        if (self.active_start == 0) { return }
+        const active_cells = self.rows * self.cols
+        // Move active cells to start
+        memcpy(self.cells.items,
+               self.cells.items + self.active_start * self.cols * @sizeOf(Cell),
+               active_cells * @sizeOf(Cell))
+        self.cells.count = active_cells
+        // Move row_wrap
+        memcpy(self.row_wrap.items,
+               self.row_wrap.items + self.active_start * @sizeOf(i64),
+               self.rows * @sizeOf(i64))
+        self.row_wrap.count = self.rows
+        // Move row_semantic
+        memcpy(self.row_semantic.items,
+               self.row_semantic.items + self.active_start * @sizeOf(i64),
+               self.rows * @sizeOf(i64))
+        self.row_semantic.count = self.rows
+        self.active_start = 0
+    }
+
     fn trimScrollback() void {
         if (self.active_start <= self.max_scrollback) { return }
         const trim = self.active_start - self.max_scrollback
@@ -561,6 +584,7 @@ struct TerminalState {
     mode_left_right_margin: bool,
     mode_sixel_scrolling: bool,
     mode_grapheme_cluster: bool,
+    mode_linefeed_newline: bool,
 
     // XTSAVE/XTRESTORE — saved DEC private mode state (CSI ? s / CSI ? r)
     // Ghostty ref: modes.zig ModeState — parallel saved bitfield
@@ -726,6 +750,7 @@ struct TerminalState {
             mode_left_right_margin: false,
             mode_sixel_scrolling: false,
             mode_grapheme_cluster: false,
+            mode_linefeed_newline: false,
             xtsaved_app_cursor: false,
             xtsaved_origin: false,
             xtsaved_wraparound: true,
@@ -846,9 +871,13 @@ struct TerminalState {
     // -- C0 control characters ----------------------------------------------
 
     /// Linefeed (LF): move cursor down one row, scroll if at bottom of region.
+    /// In LNM mode (ANSI mode 20), LF also performs carriage return.
     fn newline() void {
         self.grid.setRowWrap(self.cursor_row, 0)
         self.pending_wrap = false
+        if (self.mode_linefeed_newline) {
+            self.cursor_col = 0
+        }
         self.cursor_row += 1
         if (self.cursor_row > self.scroll_bottom) {
             var blank = self.blankCell()
@@ -1049,6 +1078,11 @@ struct TerminalState {
                 self.clearLineWithBg(row, &blank)
                 row += 1
             }
+        } else if (mode == 3) {
+            // Erase scrollback — Ghostty ref: Terminal.zig eraseDisplay(.scrollback)
+            // Keep only the active screen, discard all scrollback rows.
+            self.grid.eraseScrollback()
+            self.viewport_row = -1
         }
     }
 
@@ -1595,6 +1629,7 @@ struct TerminalState {
     fn setAnsiMode(mode: i64, enable: bool) void {
         switch (mode) {
             4 => { self.mode_insert = enable },
+            20 => { self.mode_linefeed_newline = enable },
             else => {},
         }
     }
@@ -2465,7 +2500,7 @@ struct TerminalState {
             if (rows < 0) { rows = 0 - rows }
             var i: i64 = 0
             while (i < rows) {
-                mouseToTerminalBytes(fd, button, col, row, 1, self.mode_mouse_format)
+                mouseToTerminalBytes(fd, button, col, row, 1, self.mode_mouse_format, 0)
                 i += 1
             }
             return
@@ -2570,11 +2605,19 @@ fn writeDecimalFree(fd: i64, val: i64) void {
 /// button: 0=left, 1=middle, 2=right, 32=drag, 64=wheel up, 65=wheel down.
 /// col, row: 1-indexed terminal coordinates.
 /// pressed: 1 for press/wheel, 0 for release.
-fn mouseToTerminalBytes(fd: i64, button: i64, col: i64, row: i64, pressed: i64, format: i64) void {
+/// mods: modifier bitmask (MOD_CTRL=1, MOD_SHIFT=2, MOD_ALT=4).
+/// Ghostty ref: mouse.zig — shift adds 4, alt adds 8, ctrl adds 16 to button code.
+fn mouseToTerminalBytes(fd: i64, button: i64, col: i64, row: i64, pressed: i64, format: i64, mods: i64) void {
+    // Add modifier bits to button code per X10/SGR spec
+    var btn = button
+    if ((mods & MOD_SHIFT) != 0) { btn = btn + 4 }
+    if ((mods & MOD_ALT) != 0) { btn = btn + 8 }
+    if ((mods & MOD_CTRL) != 0) { btn = btn + 16 }
+
     if (format == 1006) {
         // SGR format: ESC [ < button ; col ; row M/m
         writeStr(fd, "\x1b[<")
-        writeDecimalFree(fd, button)
+        writeDecimalFree(fd, btn)
         writeStr(fd, ";")
         writeDecimalFree(fd, col)
         writeStr(fd, ";")
@@ -2587,8 +2630,8 @@ fn mouseToTerminalBytes(fd: i64, button: i64, col: i64, row: i64, pressed: i64, 
     } else {
         // X10 classic format: ESC [ M cb cx cy
         // Ghostty ref: input/mouse.zig — X10 encoding
-        var cb = button
-        if (pressed == 0) { cb = 3 }  // All releases encoded as button 3
+        var cb = btn
+        if (pressed == 0) { cb = 3 }  // All releases encoded as button 3 (but keep modifier bits)
         // Clamp coords to X10 range (max 223 = 255 - 32)
         var cx = col
         var cy = row
@@ -2682,9 +2725,10 @@ fn keyToTerminalBytes(fd: i64, key: i64, mods: i64, app_cursor: bool) void {
         return
     }
 
-    // Delete (3~), PageUp (5~), PageDown (6~) — tilde-encoded
-    if (key == KEY_DELETE or key == KEY_PAGE_UP or key == KEY_PAGE_DOWN) {
+    // Insert (2~), Delete (3~), PageUp (5~), PageDown (6~) — tilde-encoded
+    if (key == KEY_INSERT or key == KEY_DELETE or key == KEY_PAGE_UP or key == KEY_PAGE_DOWN) {
         var num: i64 = 3
+        if (key == KEY_INSERT) { num = 2 }
         if (key == KEY_PAGE_UP) { num = 5 }
         if (key == KEY_PAGE_DOWN) { num = 6 }
 
@@ -2747,11 +2791,29 @@ fn keyToTerminalBytes(fd: i64, key: i64, mods: i64, app_cursor: bool) void {
         return
     }
 
-    // Simple special keys (no modifiers)
-    if (key == KEY_ENTER) { writeStr(fd, "\r"); return }
-    if (key == KEY_TAB) { writeStr(fd, "\t"); return }
-    if (key == KEY_BACKSPACE) { writeStr(fd, "\x7f"); return }
-    if (key == KEY_ESCAPE) { writeStr(fd, "\x1b"); return }
+    // Backspace/Enter/Tab/Escape — with modifier encoding
+    // Ghostty ref: key_encode.zig — modified special keys use CSI code;mod ~
+    if (key == KEY_BACKSPACE) {
+        if (has_alt and !has_ctrl) { writeStr(fd, "\x1b\x7f"); return }  // Alt+BS = ESC DEL
+        if (has_ctrl) { writeStr(fd, "\x08"); return }                     // Ctrl+BS = BS (0x08)
+        writeStr(fd, "\x7f"); return
+    }
+    if (key == KEY_ENTER) {
+        if (has_alt and !has_ctrl) { writeStr(fd, "\x1b\r"); return }    // Alt+Enter = ESC CR
+        if (has_ctrl) { writeStr(fd, "\x1b\r"); return }                   // Ctrl+Enter = ESC CR
+        writeStr(fd, "\r"); return
+    }
+    if (key == KEY_TAB) {
+        if (has_ctrl) {
+            // Ctrl+Tab — no standard legacy encoding, send as-is
+            writeStr(fd, "\t"); return
+        }
+        writeStr(fd, "\t"); return
+    }
+    if (key == KEY_ESCAPE) {
+        if (has_alt) { writeStr(fd, "\x1b\x1b"); return }               // Alt+Esc = ESC ESC
+        writeStr(fd, "\x1b"); return
+    }
 
     // Alt+printable → ESC + key (meta prefix)
     if (has_alt and !has_ctrl and key >= 32 and key <= 126) {
@@ -2797,6 +2859,7 @@ fn kittyMapping(key: i64) (i64, i64) {
         KEY_F10 => (21, '~'),
         KEY_F11 => (23, '~'),
         KEY_F12 => (24, '~'),
+        KEY_INSERT => (2, '~'),
         KEY_DELETE => (3, '~'),
         KEY_PAGE_UP => (5, '~'),
         KEY_PAGE_DOWN => (6, '~'),

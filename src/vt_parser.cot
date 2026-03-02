@@ -105,6 +105,14 @@ struct VtParser {
 
     /// Process a single byte through the state machine.
     fn feed(terminal: *TerminalState, b: i64) void {
+        // CAN (0x18) / SUB (0x1A) abort any in-progress sequence
+        // Ghostty ref: Parser.zig — CAN/SUB transitions to Ground from any state
+        if (b == 0x18 or b == 0x1A) {
+            self.state = VtState.Ground
+            self.utf8_remaining = 0
+            return
+        }
+
         // ESC always transitions to escape state, aborts any UTF-8 sequence
         if (b == 0x1B) {
             // If we were in OSC, dispatch what we have (ESC \ is ST)

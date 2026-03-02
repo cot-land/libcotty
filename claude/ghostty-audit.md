@@ -8,9 +8,9 @@ Conducted 2026-03-02.
 ## Tier 1: Critical (Visibly Broken / Blocks Daily Use)
 
 ### 1. `saveCursor`/`restoreCursor` (DECSC/DECRC) doesn't save SGR, charset, origin, pending_wrap
-- [ ] Ghostty saves the full style, protected flag, pending_wrap, origin mode, and charset state. libcotty only saves row/col. Programs like vim, tmux, and screen rely on DECSC/DECRC to preserve attributes across alt-screen transitions.
+- [x] Ghostty saves the full style, protected flag, pending_wrap, origin mode, and charset state. libcotty only saves row/col. Programs like vim, tmux, and screen rely on DECSC/DECRC to preserve attributes across alt-screen transitions.
 - Ghostty ref: `Screen.SavedCursor` — x, y, style, protected, pending_wrap, origin, charset
-- libcotty: `saved_row`, `saved_col` only
+- Fixed: saveCursor/restoreCursor now saves all SGR attributes, charsets G0-G3, origin mode, and pending_wrap
 
 ### 2. Erase operations ignore current SGR background
 - [x] When the current SGR has a non-default bg color, erased cells should show that bg. Ghostty's `clearCells` fills with the cursor's current style bg. libcotty always writes `Cell.init()` → `bg_type = COLOR_NONE`. Visible bug: `printf '\e[44m'; clear` shows black instead of blue.
@@ -57,13 +57,16 @@ Conducted 2026-03-02.
 - [ ] Should go to `scroll_left` when origin mode is set or cursor is inside left margin.
 
 ### 11. `eraseDisplay` mode 3 (erase scrollback) missing
-- [ ] `CSI 3 J` is widely used (macOS Cmd+K). libcotty cannot erase scrollback.
+- [x] `CSI 3 J` is widely used (macOS Cmd+K). libcotty cannot erase scrollback.
+- Fixed: Added `eraseScrollback()` to Grid, mode 3 resets active_start and viewport
 
 ### 12. LNM mode (ANSI mode 20) missing
-- [ ] When set, LF also does CR. Some programs rely on this.
+- [x] When set, LF also does CR. Some programs rely on this.
+- Fixed: Added `mode_linefeed_newline` field, `setAnsiMode` case 20, newline() checks flag
 
 ### 13. `insertLines`/`deleteLines` don't move cursor to left margin
-- [ ] Ghostty moves cursor to `scroll_left` after IL/DL. libcotty leaves cursor in place.
+- [x] Ghostty moves cursor to `scroll_left` after IL/DL. libcotty leaves cursor in place.
+- Fixed: `handleInsertLines`/`handleDeleteLines` wrappers set cursor_col = 0
 
 ### 14. Colon-separated SGR sub-parameters entirely absent
 - [ ] No `4:3` (curly underline), no `38:2:r:g:b` (modern colon color format). Parser has no colon vs semicolon separator concept.
@@ -75,10 +78,12 @@ Conducted 2026-03-02.
 - [ ] Per CLAUDE.md, all logic must be in Cot. Should move to terminal.cot or cell.cot.
 
 ### 17. Backspace/Enter/Tab with modifiers not encoded
-- [ ] BS always \x7f, Enter always \r, Tab only shift. Missing alt+BS, ctrl+BS, ctrl+enter, alt+enter, ctrl+tab.
+- [x] BS always \x7f, Enter always \r, Tab only shift. Missing alt+BS, ctrl+BS, ctrl+enter, alt+enter, ctrl+tab.
+- Fixed: Alt+BS=ESC DEL, Ctrl+BS=0x08, Alt/Ctrl+Enter=ESC CR, Alt+Esc=ESC ESC
 
 ### 18. No `fullReset` (RIS, ESC c)
-- [ ] softReset exists but no hard reset. RIS should clear everything.
+- [x] softReset exists but no hard reset. RIS should clear everything.
+- Fixed: Full RIS implemented in vt_parser.cot — clears screen, resets modes, exits alt screen
 
 ### 19. XTGETTCAP only handles 3 capabilities
 - [ ] Only TN, Co, RGB. neovim requests smcup, rmcup, setaf, sgr, kcuu1 and many others.
@@ -103,7 +108,8 @@ Conducted 2026-03-02.
 - [ ] Flags 2 and 4 of Kitty keyboard protocol.
 
 ### 25. No Insert key mapping
-- [ ] No KEY_INSERT constant, no keyCode mapping, no `ESC [ 2 ~`.
+- [x] No KEY_INSERT constant, no keyCode mapping, no `ESC [ 2 ~`.
+- Fixed: Added KEY_INSERT=276, tilde encoding (2~), Kitty mapping, Swift keyCode 114 (Help/Insert)
 
 ### 26. macOS option-as-alt not configurable
 - [ ] Option always treated as Alt. Users wanting Option+e → é get ESC e instead.
@@ -118,13 +124,15 @@ Conducted 2026-03-02.
 - [ ] Mode 2027 flag exists but putChar has no width=0 path or grapheme break detection.
 
 ### 30. Mouse modifier bits not encoded in button code
-- [ ] Shift(+4), alt(+8), ctrl(+16) never added to mouse button code.
+- [x] Shift(+4), alt(+8), ctrl(+16) never added to mouse button code.
+- Fixed: `mouseToTerminalBytes` accepts mods param, adds shift/alt/ctrl bits to button code. Swift passes NSEvent modifiers.
 
 ### 31. No font variants (bold/italic font faces)
 - [ ] GlyphAtlas uses single CTFont. CELL_BOLD/CELL_ITALIC ignored by renderer.
 
 ### 32. CAN (0x18) / SUB (0x1A) don't abort sequences
-- [ ] Should cancel in-progress escape sequence and return to ground state.
+- [x] Should cancel in-progress escape sequence and return to ground state.
+- Fixed: Early check in `feed()` — CAN/SUB transitions to Ground from any state
 
 ### 33. No configurable shell command
 - [ ] Hardcoded to /bin/zsh. No `command` config option.

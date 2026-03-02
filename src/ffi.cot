@@ -828,10 +828,10 @@ export fn cotty_terminal_mouse_format(surface: i64) i64 {
 /// No-ops if mouse tracking is disabled.
 /// button: 0=left, 1=middle, 2=right, 32=drag, 64=wheel up, 65=wheel down.
 /// col, row: 1-indexed. pressed: 1=press/wheel, 0=release.
-export fn cotty_terminal_mouse_event(surface: i64, button: i64, col: i64, row: i64, pressed: i64) void {
+export fn cotty_terminal_mouse_event(surface: i64, button: i64, col: i64, row: i64, pressed: i64, mods: i64) void {
     const sptr = getSurfacePtr(surface)
     if (sptr.terminal.mode_mouse_tracking == 0) { return }
-    mouseToTerminalBytes(sptr.shell.master_fd, button, col, row, pressed, sptr.terminal.mode_mouse_format)
+    mouseToTerminalBytes(sptr.shell.master_fd, button, col, row, pressed, sptr.terminal.mode_mouse_format, mods)
 }
 
 /// Handle a scroll wheel event. All logic lives in Cot (ported from Ghostty).
