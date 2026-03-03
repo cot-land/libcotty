@@ -16,6 +16,7 @@ import "inspector"
 import "selection"
 import "transaction"
 import "history"
+import "document"
 
 // ============================================================================
 // Pipe fd unpacking (same bit ops as pty.cot)
@@ -71,14 +72,30 @@ const SurfaceKind = enum(u8) {
     Terminal,
 }
 
+// ============================================================================
+// Character category for word movement
+// ============================================================================
+
+/// Classify a character for word movement.
+/// 0 = whitespace, 1 = word (alnum + _), 2 = punctuation
+fn charCategory(ch: int) int {
+    if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') { return 0 }
+    if (ch == '_') { return 1 }
+    if (ch >= 'a' and ch <= 'z') { return 1 }
+    if (ch >= 'A' and ch <= 'Z') { return 1 }
+    if (ch >= '0' and ch <= '9') { return 1 }
+    return 2
+}
+
 /// A single surface (tab/window).
 struct Surface {
     kind: SurfaceKind,
-    buffer: Buffer,
+    document: Document,
     cursor: Cursor,
     scroll_offset: int,
-    filepath: ?string,
-    dirty: bool,
+    mode: Mode,
+    viewport_rows: int,
+    viewport_cols: int,
     terminal: TerminalState,
     parser: VtParser,
     shell: Pty,
@@ -89,7 +106,6 @@ struct Surface {
     render_dirty: i64,
     child_exited: i64,
     inspector: Inspector,
-    history: History,
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
     static fn init() *Surface {
@@ -99,11 +115,12 @@ struct Surface {
         dummy_thread.handle = 0
         return new Surface {
             kind: SurfaceKind.Editor,
-            buffer: Buffer.init(),
+            document: Document.init(),
             cursor: Cursor.init(),
             scroll_offset: 0,
-            filepath: null,
-            dirty: false,
+            mode: Mode.Insert,
+            viewport_rows: 0,
+            viewport_cols: 0,
             terminal: TerminalState.init(0, 0),
             parser: VtParser.init(),
             shell: Pty { master_fd: -1, child_pid: -1 },
@@ -114,7 +131,6 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(24, 80),
-            history: History.init(),
         }
     }
 
@@ -126,13 +142,14 @@ struct Surface {
         dummy_thread.handle = 0
         const content = readFile(path) catch {
             // File doesn't exist yet — create empty surface with path
-            return new Surface {
+            var s = new Surface {
                 kind: SurfaceKind.Editor,
-                buffer: Buffer.init(),
+                document: Document.init(),
                 cursor: Cursor.init(),
                 scroll_offset: 0,
-                filepath: path,
-                dirty: false,
+                mode: Mode.Insert,
+                viewport_rows: 0,
+                viewport_cols: 0,
                 terminal: TerminalState.init(0, 0),
                 parser: VtParser.init(),
                 shell: Pty { master_fd: -1, child_pid: -1 },
@@ -143,17 +160,19 @@ struct Surface {
                 render_dirty: 0,
                 child_exited: 0,
                 inspector: Inspector.init(24, 80),
-                history: History.init(),
             }
+            s.document.filepath = path
+            return s
         }
 
-        return new Surface {
+        var s = new Surface {
             kind: SurfaceKind.Editor,
-            buffer: Buffer.initWithContent(content),
+            document: Document.initWithContent(content),
             cursor: Cursor.init(),
             scroll_offset: 0,
-            filepath: path,
-            dirty: false,
+            mode: Mode.Insert,
+            viewport_rows: 0,
+            viewport_cols: 0,
             terminal: TerminalState.init(0, 0),
             parser: VtParser.init(),
             shell: Pty { master_fd: -1, child_pid: -1 },
@@ -164,8 +183,9 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(24, 80),
-            history: History.init(),
         }
+        s.document.filepath = path
+        return s
     }
 
     /// Create a terminal surface with a shell spawned via Cot's PTY.
@@ -189,11 +209,12 @@ struct Surface {
 
         return new Surface {
             kind: SurfaceKind.Terminal,
-            buffer: Buffer.init(),
+            document: Document.init(),
             cursor: Cursor.init(),
             scroll_offset: 0,
-            filepath: null,
-            dirty: false,
+            mode: Mode.Insert,
+            viewport_rows: 0,
+            viewport_cols: 0,
             terminal: term,
             parser: VtParser.init(),
             shell: pty,
@@ -204,7 +225,6 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(rows, cols),
-            history: History.init(),
         }
     }
 
@@ -214,9 +234,44 @@ struct Surface {
         self.io_thread = Thread.spawn(@ptrToInt(ioReaderMain), @ptrToInt(self))
     }
 
-    /// Handle an input action, mutating buffer and cursor as needed.
-    /// Text mutations go through transactions for undo/redo support.
+    /// Handle an input action, dispatching by current mode.
     fn handleInput(action: InputAction, key: int) void {
+        switch (action) {
+            InputAction.enter_normal => {
+                self.mode = Mode.Normal
+            },
+            InputAction.enter_insert => {
+                self.mode = Mode.Insert
+            },
+            InputAction.enter_insert_after => {
+                // Move cursor one right (if possible), then enter Insert mode
+                if (self.cursor.offset < self.document.buffer.len()) {
+                    const ch = self.document.buffer.charAt(self.cursor.offset)
+                    self.cursor.offset += 1
+                    if (ch == '\n') {
+                        self.cursor.line += 1
+                        self.cursor.col = 0
+                    } else {
+                        self.cursor.col += 1
+                    }
+                }
+                self.mode = Mode.Insert
+            },
+            InputAction.enter_select => {
+                self.mode = Mode.Select
+            },
+            else => {
+                if (self.mode == Mode.Insert) {
+                    self.handleInsertMode(action, key)
+                } else if (self.mode == Mode.Normal) {
+                    self.handleNormalMode(action, key)
+                }
+            },
+        }
+    }
+
+    /// Handle input in Insert mode — current behavior (insert/delete/move/undo/redo).
+    fn handleInsertMode(action: InputAction, key: int) void {
         switch (action) {
             InputAction.insert_char => {
                 const cursor_before = self.cursor.offset
@@ -224,14 +279,12 @@ struct Surface {
                 var cs = ChangeSet.init()
                 if (cursor_before > 0) { cs.retain(cursor_before) }
                 cs.insertByte(key)
-                const rest = self.buffer.len() - cursor_before
+                const rest = self.document.buffer.len() - cursor_before
                 if (rest > 0) { cs.retain(rest) }
                 var txn = Transaction { changes: cs }
                 // Compute cursor_after
                 var cursor_after = cursor_before + 1
-                // Commit (computes inverse from original buffer), then apply
-                self.history.commit(txn, &self.buffer, cursor_before, cursor_after)
-                txn.apply(&self.buffer)
+                self.document.apply(txn, cursor_before, cursor_after)
                 // Update cursor
                 self.cursor.offset = cursor_after
                 self.cursor.col += 1
@@ -239,68 +292,80 @@ struct Surface {
                     self.cursor.line += 1
                     self.cursor.col = 0
                 }
-                self.dirty = true
             },
             InputAction.delete_back => {
                 if (self.cursor.offset > 0) {
                     const cursor_before = self.cursor.offset
-                    const deleted_char = self.buffer.charAt(cursor_before - 1)
+                    const deleted_char = self.document.buffer.charAt(cursor_before - 1)
                     // Build transaction: retain to pos-1, delete 1, retain rest
                     var cs = ChangeSet.init()
                     if (cursor_before > 1) { cs.retain(cursor_before - 1) }
                     cs.delete(1)
-                    const rest = self.buffer.len() - cursor_before
+                    const rest = self.document.buffer.len() - cursor_before
                     if (rest > 0) { cs.retain(rest) }
                     var txn = Transaction { changes: cs }
                     const cursor_after = cursor_before - 1
-                    self.history.commit(txn, &self.buffer, cursor_before, cursor_after)
-                    txn.apply(&self.buffer)
+                    self.document.apply(txn, cursor_before, cursor_after)
                     self.cursor.offset = cursor_after
                     if (deleted_char == '\n') {
                         self.recomputeLineCol()
                     } else {
                         self.cursor.col -= 1
                     }
-                    self.dirty = true
                 }
             },
             InputAction.delete_forward => {
-                if (self.cursor.offset < self.buffer.len()) {
+                if (self.cursor.offset < self.document.buffer.len()) {
                     const cursor_before = self.cursor.offset
                     // Build transaction: retain to pos, delete 1, retain rest
                     var cs = ChangeSet.init()
                     if (cursor_before > 0) { cs.retain(cursor_before) }
                     cs.delete(1)
-                    const rest = self.buffer.len() - cursor_before - 1
+                    const rest = self.document.buffer.len() - cursor_before - 1
                     if (rest > 0) { cs.retain(rest) }
                     var txn = Transaction { changes: cs }
-                    self.history.commit(txn, &self.buffer, cursor_before, cursor_before)
-                    txn.apply(&self.buffer)
-                    self.dirty = true
+                    self.document.apply(txn, cursor_before, cursor_before)
                 }
             },
             InputAction.undo => {
-                const cursor = self.history.undo(&self.buffer)
-                if (cursor >= 0) {
-                    self.cursor.offset = cursor
-                    if (self.cursor.offset > self.buffer.len()) {
-                        self.cursor.offset = self.buffer.len()
-                    }
-                    self.recomputeLineCol()
-                    self.dirty = true
-                }
+                self.performUndo()
             },
             InputAction.redo => {
-                const cursor = self.history.redo(&self.buffer)
-                if (cursor >= 0) {
-                    self.cursor.offset = cursor
-                    if (self.cursor.offset > self.buffer.len()) {
-                        self.cursor.offset = self.buffer.len()
-                    }
-                    self.recomputeLineCol()
-                    self.dirty = true
-                }
+                self.performRedo()
             },
+            else => {
+                self.handleMovement(action)
+            },
+        }
+    }
+
+    /// Handle input in Normal mode — movement + mode transitions + word movement + undo/redo.
+    fn handleNormalMode(action: InputAction, key: int) void {
+        switch (action) {
+            InputAction.undo => {
+                self.performUndo()
+            },
+            InputAction.redo => {
+                self.performRedo()
+            },
+            InputAction.move_word_forward => {
+                self.moveWordForward()
+            },
+            InputAction.move_word_backward => {
+                self.moveWordBackward()
+            },
+            InputAction.move_word_end => {
+                self.moveWordEnd()
+            },
+            else => {
+                self.handleMovement(action)
+            },
+        }
+    }
+
+    /// Handle movement actions (shared by Insert and Normal mode).
+    fn handleMovement(action: InputAction) void {
+        switch (action) {
             InputAction.move_left => {
                 if (self.cursor.offset > 0) {
                     self.cursor.offset -= 1
@@ -312,8 +377,8 @@ struct Surface {
                 }
             },
             InputAction.move_right => {
-                if (self.cursor.offset < self.buffer.len()) {
-                    const ch = self.buffer.charAt(self.cursor.offset)
+                if (self.cursor.offset < self.document.buffer.len()) {
+                    const ch = self.document.buffer.charAt(self.cursor.offset)
                     self.cursor.offset += 1
                     if (ch == '\n') {
                         self.cursor.line += 1
@@ -327,7 +392,7 @@ struct Surface {
                 if (self.cursor.line > 0) {
                     const target_col = self.cursor.col
                     self.cursor.line -= 1
-                    const line_len = self.buffer.lineLength(self.cursor.line)
+                    const line_len = self.document.buffer.lineLength(self.cursor.line)
                     if (target_col < line_len) {
                         self.cursor.col = target_col
                     } else {
@@ -337,11 +402,11 @@ struct Surface {
                 }
             },
             InputAction.move_down => {
-                const total_lines = self.buffer.lineCount()
+                const total_lines = self.document.buffer.lineCount()
                 if (self.cursor.line < total_lines - 1) {
                     const target_col = self.cursor.col
                     self.cursor.line += 1
-                    const line_len = self.buffer.lineLength(self.cursor.line)
+                    const line_len = self.document.buffer.lineLength(self.cursor.line)
                     if (target_col < line_len) {
                         self.cursor.col = target_col
                     } else {
@@ -355,11 +420,106 @@ struct Surface {
                 self.recomputeOffset()
             },
             InputAction.move_line_end => {
-                self.cursor.col = self.buffer.lineLength(self.cursor.line)
+                self.cursor.col = self.document.buffer.lineLength(self.cursor.line)
                 self.recomputeOffset()
             },
             else => {},
         }
+    }
+
+    /// Perform undo via Document, update cursor.
+    fn performUndo() void {
+        const cursor = self.document.undo()
+        if (cursor >= 0) {
+            self.cursor.offset = cursor
+            if (self.cursor.offset > self.document.buffer.len()) {
+                self.cursor.offset = self.document.buffer.len()
+            }
+            self.recomputeLineCol()
+        }
+    }
+
+    /// Perform redo via Document, update cursor.
+    fn performRedo() void {
+        const cursor = self.document.redo()
+        if (cursor >= 0) {
+            self.cursor.offset = cursor
+            if (self.cursor.offset > self.document.buffer.len()) {
+                self.cursor.offset = self.document.buffer.len()
+            }
+            self.recomputeLineCol()
+        }
+    }
+
+    /// Move cursor forward by one word (w in vim).
+    /// Skip current category, skip whitespace, land on next word start.
+    fn moveWordForward() void {
+        const buf_len = self.document.buffer.len()
+        if (self.cursor.offset >= buf_len) { return }
+        var pos = self.cursor.offset
+        // Get category of current char
+        const start_cat = charCategory(self.document.buffer.charAt(pos))
+        // Skip characters of the same category
+        while (pos < buf_len) {
+            const cat = charCategory(self.document.buffer.charAt(pos))
+            if (cat != start_cat) { break }
+            pos += 1
+        }
+        // Skip whitespace
+        while (pos < buf_len) {
+            const cat = charCategory(self.document.buffer.charAt(pos))
+            if (cat != 0) { break }
+            pos += 1
+        }
+        self.cursor.offset = pos
+        self.recomputeLineCol()
+    }
+
+    /// Move cursor backward by one word (b in vim).
+    /// Skip whitespace backward, then skip word backward.
+    fn moveWordBackward() void {
+        if (self.cursor.offset == 0) { return }
+        var pos = self.cursor.offset - 1
+        // Skip whitespace backward
+        while (pos > 0) {
+            const cat = charCategory(self.document.buffer.charAt(pos))
+            if (cat != 0) { break }
+            pos -= 1
+        }
+        // Get the category at current position and skip backward
+        const cat = charCategory(self.document.buffer.charAt(pos))
+        while (pos > 0) {
+            const prev_cat = charCategory(self.document.buffer.charAt(pos - 1))
+            if (prev_cat != cat) { break }
+            pos -= 1
+        }
+        self.cursor.offset = pos
+        self.recomputeLineCol()
+    }
+
+    /// Move cursor to end of current word (e in vim).
+    /// Skip whitespace forward, then skip word forward, land on last char.
+    fn moveWordEnd() void {
+        const buf_len = self.document.buffer.len()
+        if (self.cursor.offset >= buf_len - 1) { return }
+        var pos = self.cursor.offset + 1
+        // Skip whitespace
+        while (pos < buf_len) {
+            const cat = charCategory(self.document.buffer.charAt(pos))
+            if (cat != 0) { break }
+            pos += 1
+        }
+        // Skip characters of the same category
+        if (pos < buf_len) {
+            const cat = charCategory(self.document.buffer.charAt(pos))
+            while (pos < buf_len - 1) {
+                const next_cat = charCategory(self.document.buffer.charAt(pos + 1))
+                if (next_cat != cat) { break }
+                pos += 1
+            }
+        }
+        self.cursor.offset = pos
+        self.recomputeLineCol()
     }
 
     /// Recompute line/col from byte offset by scanning from start.
@@ -367,7 +527,7 @@ struct Surface {
         var line = 0
         var col = 0
         for i in 0..self.cursor.offset {
-            if (self.buffer.charAt(i) == '\n') {
+            if (self.document.buffer.charAt(i) == '\n') {
                 line += 1
                 col = 0
             } else {
@@ -380,12 +540,12 @@ struct Surface {
 
     /// Recompute byte offset from line/col.
     fn recomputeOffset() void {
-        self.cursor.offset = self.buffer.lineStartOffset(self.cursor.line) + self.cursor.col
+        self.cursor.offset = self.document.buffer.lineStartOffset(self.cursor.line) + self.cursor.col
     }
 
     /// Render the surface content to a string (for testing/debugging).
     fn render() string {
-        return self.buffer.toString()
+        return self.document.buffer.toString()
     }
 
     /// Returns true if this surface is a terminal emulator.
@@ -414,7 +574,7 @@ struct Surface {
         if (self.kind == SurfaceKind.Terminal) {
             return "terminal"
         }
-        if (self.filepath) |path| {
+        if (self.document.filepath) |path| {
             return path
         }
         return "untitled"
@@ -428,21 +588,22 @@ struct Surface {
 test "surface init empty" {
     var s = Surface.init()
     @assertEq(s.kind, SurfaceKind.Editor)
-    @assertEq(s.buffer.len(), 0)
+    @assertEq(s.document.buffer.len(), 0)
     @assertEq(s.cursor.line, 0)
     @assertEq(s.cursor.col, 0)
-    @assertEq(s.dirty, false)
+    @assertEq(s.document.dirty, false)
     @assertEq(s.title(), "untitled")
     @assert(!s.isTerminal())
+    @assertEq(s.mode, Mode.Insert)
 }
 
 test "surface handle insert" {
     var s = Surface.init()
     s.handleInput(InputAction.insert_char, 'h')
     s.handleInput(InputAction.insert_char, 'i')
-    @assertEq(s.buffer.len(), 2)
+    @assertEq(s.document.buffer.len(), 2)
     @assertEq(s.render(), "hi")
-    @assertEq(s.dirty, true)
+    @assertEq(s.document.dirty, true)
 }
 
 test "surface handle delete back" {
@@ -466,7 +627,7 @@ test "surface handle move" {
 
 test "surface title with filepath" {
     var s = Surface.init()
-    s.filepath = "test.cot"
+    s.document.filepath = "test.cot"
     @assertEq(s.title(), "test.cot")
 }
 
@@ -707,4 +868,146 @@ test "surface undo delete forward" {
     s.handleInput(InputAction.undo, 0)
     @assertEq(s.render(), "ab")
     @assertEq(s.cursor.offset, 0)
+}
+
+test "surface mode switching" {
+    var s = Surface.init()
+    @assertEq(s.mode, Mode.Insert)
+    // Escape → Normal
+    s.handleInput(InputAction.enter_normal, 0)
+    @assertEq(s.mode, Mode.Normal)
+    // i → Insert
+    s.handleInput(InputAction.enter_insert, 0)
+    @assertEq(s.mode, Mode.Insert)
+    // Escape → Normal
+    s.handleInput(InputAction.enter_normal, 0)
+    @assertEq(s.mode, Mode.Normal)
+    // v → Select
+    s.handleInput(InputAction.enter_select, 0)
+    @assertEq(s.mode, Mode.Select)
+}
+
+test "surface normal mode movement" {
+    var s = Surface.init()
+    // Type "hello" in insert mode
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    @assertEq(s.cursor.offset, 5)
+    // Switch to normal mode
+    s.handleInput(InputAction.enter_normal, 0)
+    @assertEq(s.mode, Mode.Normal)
+    // In normal mode, typing should do nothing
+    s.handleInput(InputAction.none, 'x')
+    @assertEq(s.render(), "hello")
+    // Movement should work
+    s.handleInput(InputAction.move_left, 0)
+    @assertEq(s.cursor.offset, 4)
+    s.handleInput(InputAction.move_left, 0)
+    @assertEq(s.cursor.offset, 3)
+}
+
+test "surface enter insert after" {
+    var s = Surface.init()
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    s.handleInput(InputAction.insert_char, 'c')
+    // cursor at 3, move to position 1
+    s.cursor.offset = 1
+    s.cursor.col = 1
+    // enter_insert_after moves right then enters insert
+    s.handleInput(InputAction.enter_insert_after, 0)
+    @assertEq(s.cursor.offset, 2)
+    @assertEq(s.mode, Mode.Insert)
+}
+
+test "surface word forward" {
+    var s = Surface.init()
+    // "hello world"
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, ' ')
+    s.handleInput(InputAction.insert_char, 'w')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, 'r')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'd')
+    // cursor at 11, move to start
+    s.cursor.offset = 0
+    s.cursor.line = 0
+    s.cursor.col = 0
+    s.handleInput(InputAction.enter_normal, 0)
+    // w → skip "hello", skip space, land on "world"
+    s.handleInput(InputAction.move_word_forward, 0)
+    @assertEq(s.cursor.offset, 6)
+    @assertEq(s.cursor.col, 6)
+}
+
+test "surface word backward" {
+    var s = Surface.init()
+    // "hello world"
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, ' ')
+    s.handleInput(InputAction.insert_char, 'w')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, 'r')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'd')
+    // cursor at end (11)
+    s.handleInput(InputAction.enter_normal, 0)
+    // b → skip "world" back, skip space, land on start of "hello"?
+    // Actually from offset 11 (past end), b goes to: pos-1=10 'd', cat=1 word,
+    // skip word backward: 'd','l','r','o','w' → pos=6. Then prev_cat at pos-1=5=' ' cat=0 ≠ 1, stop.
+    s.handleInput(InputAction.move_word_backward, 0)
+    @assertEq(s.cursor.offset, 6)
+    // b again → skip from 6: pos-1=5=' ' cat=0, skip whitespace: pos=5→cat=0, pos>0
+    // then pos=4 'o' cat=1, skip while prev (pos-1) same cat
+    s.handleInput(InputAction.move_word_backward, 0)
+    @assertEq(s.cursor.offset, 0)
+}
+
+test "surface word end" {
+    var s = Surface.init()
+    // "hello world"
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, ' ')
+    s.handleInput(InputAction.insert_char, 'w')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, 'r')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'd')
+    // cursor at start
+    s.cursor.offset = 0
+    s.cursor.line = 0
+    s.cursor.col = 0
+    s.handleInput(InputAction.enter_normal, 0)
+    // e → skip to end of "hello": pos=0+1=1, cat=1 word, skip while next same: 1→2→3→4 stop (pos+1=5 ' ' cat=0)
+    s.handleInput(InputAction.move_word_end, 0)
+    @assertEq(s.cursor.offset, 4)
+}
+
+test "char category" {
+    @assertEq(charCategory(' '), 0)
+    @assertEq(charCategory('\t'), 0)
+    @assertEq(charCategory('\n'), 0)
+    @assertEq(charCategory('a'), 1)
+    @assertEq(charCategory('Z'), 1)
+    @assertEq(charCategory('0'), 1)
+    @assertEq(charCategory('_'), 1)
+    @assertEq(charCategory('.'), 2)
+    @assertEq(charCategory('('), 2)
+    @assertEq(charCategory('+'), 2)
 }

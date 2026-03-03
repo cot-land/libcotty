@@ -16,6 +16,9 @@ import "pty"
 import "config"
 import "inspector"
 import "workspace"
+import "document"
+import "history"
+import "selection"
 import "file_tree"
 import "command_palette"
 import "theme_palette"
@@ -207,12 +210,11 @@ export fn cotty_surface_free(surface: i64) void {
 // Surface input
 // ============================================================================
 
-/// Send a key event to a surface. Routes through keyToAction dispatch.
+/// Send a key event to a surface. Routes through keyToActionInMode dispatch.
 export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
     const event = KeyEvent { key: key, mods: mods }
-    const action = keyToAction(event)
-
     const ptr = getSurfacePtr(surface)
+    const action = keyToActionInMode(event, ptr.mode)
 
     switch (action) {
         InputAction.insert_char => {
@@ -280,6 +282,37 @@ export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
             g_action_tag = ACTION_CLOSE_SURFACE
             g_action_surface = surface
         },
+        InputAction.enter_normal => {
+            ptr.handleInput(InputAction.enter_normal, 0)
+        },
+        InputAction.enter_insert => {
+            ptr.handleInput(InputAction.enter_insert, 0)
+        },
+        InputAction.enter_insert_after => {
+            ptr.handleInput(InputAction.enter_insert_after, 0)
+        },
+        InputAction.enter_select => {
+            ptr.handleInput(InputAction.enter_select, 0)
+        },
+        InputAction.move_word_forward => {
+            ptr.handleInput(InputAction.move_word_forward, 0)
+        },
+        InputAction.move_word_backward => {
+            ptr.handleInput(InputAction.move_word_backward, 0)
+        },
+        InputAction.move_word_end => {
+            ptr.handleInput(InputAction.move_word_end, 0)
+        },
+        InputAction.undo => {
+            ptr.handleInput(InputAction.undo, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.redo => {
+            ptr.handleInput(InputAction.redo, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
         else => {},
     }
 }
@@ -296,22 +329,24 @@ export fn cotty_surface_text(surface: i64, ptr: *u8, len: i64) void {
 }
 
 /// Load content into a surface, replacing existing buffer.
+/// Resets the entire document (buffer + history + selection) to avoid stale state.
 export fn cotty_surface_load_content(surface: i64, ptr: *u8, len: i64) void {
     const sptr = getSurfacePtr(surface)
-    // Reset surface to empty
-    sptr.buffer = Buffer.init()
-    sptr.cursor = Cursor.init()
-    sptr.dirty = false
-    // Insert content byte by byte
+    // Build content buffer directly (no transactions — this is a full replacement)
+    var buf = Buffer.init()
     for i in 0..len {
         const byte_ptr = @intToPtr(*u8, @ptrToInt(ptr) + i)
-        sptr.handleInput(InputAction.insert_char, byte_ptr.*)
+        buf.insert(byte_ptr.*)
     }
+    // Replace entire document with fresh state
+    sptr.document.buffer = buf
+    sptr.document.history = History.init()
+    sptr.document.selection = Selection.point(0)
+    sptr.document.dirty = false
     // Reset cursor to start
-    sptr.cursor.offset = 0
-    sptr.cursor.line = 0
-    sptr.cursor.col = 0
-    sptr.dirty = false
+    sptr.cursor = Cursor.init()
+    // Ensure Insert mode for editing
+    sptr.mode = Mode.Insert
 }
 
 // ============================================================================
@@ -319,23 +354,23 @@ export fn cotty_surface_load_content(surface: i64, ptr: *u8, len: i64) void {
 // ============================================================================
 
 export fn cotty_surface_buffer_len(surface: i64) i64 {
-    return getSurfacePtr(surface).buffer.len()
+    return getSurfacePtr(surface).document.buffer.len()
 }
 
 export fn cotty_surface_buffer_line_count(surface: i64) i64 {
-    return getSurfacePtr(surface).buffer.lineCount()
+    return getSurfacePtr(surface).document.buffer.lineCount()
 }
 
 export fn cotty_surface_buffer_line_length(surface: i64, line: i64) i64 {
-    return getSurfacePtr(surface).buffer.lineLength(line)
+    return getSurfacePtr(surface).document.buffer.lineLength(line)
 }
 
 export fn cotty_surface_buffer_line_start_offset(surface: i64, line: i64) i64 {
-    return getSurfacePtr(surface).buffer.lineStartOffset(line)
+    return getSurfacePtr(surface).document.buffer.lineStartOffset(line)
 }
 
 export fn cotty_surface_buffer_char_at(surface: i64, pos: i64) i64 {
-    return getSurfacePtr(surface).buffer.charAt(pos)
+    return getSurfacePtr(surface).document.buffer.charAt(pos)
 }
 
 export fn cotty_surface_cursor_line(surface: i64) i64 {
@@ -351,14 +386,14 @@ export fn cotty_surface_cursor_offset(surface: i64) i64 {
 }
 
 export fn cotty_surface_is_dirty(surface: i64) i64 {
-    if (getSurfacePtr(surface).dirty) {
+    if (getSurfacePtr(surface).document.dirty) {
         return 1
     }
     return 0
 }
 
 export fn cotty_surface_set_clean(surface: i64) void {
-    getSurfacePtr(surface).dirty = false
+    getSurfacePtr(surface).document.dirty = false
 }
 
 // ============================================================================
@@ -368,6 +403,27 @@ export fn cotty_surface_set_clean(surface: i64) void {
 /// Return the surface kind: 0 = editor, 1 = terminal.
 export fn cotty_surface_kind(surface: i64) i64 {
     return getSurfacePtr(surface).kind
+}
+
+// ============================================================================
+// Surface mode and viewport
+// ============================================================================
+
+/// Return the current editor mode: 0 = Normal, 1 = Insert, 2 = Select.
+export fn cotty_surface_mode(surface: i64) i64 {
+    return @intCast(i64, getSurfacePtr(surface).mode)
+}
+
+/// Set the viewport dimensions (rows and cols). Used for scroll clamping.
+export fn cotty_surface_set_viewport(surface: i64, rows: i64, cols: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.viewport_rows = rows
+    ptr.viewport_cols = cols
+}
+
+/// Return the current scroll offset.
+export fn cotty_surface_scroll_offset(surface: i64) i64 {
+    return getSurfacePtr(surface).scroll_offset
 }
 
 // ============================================================================
@@ -1232,7 +1288,7 @@ export fn cotty_workspace_tab_is_preview(ws: i64, index: i64) i64 {
 export fn cotty_workspace_tab_is_dirty(ws: i64, index: i64) i64 {
     const wptr = getWorkspacePtr(ws)
     if (index < 0 or index >= wptr.tabs.count) { return 0 }
-    if (wptr.getTab(index).surface.dirty) { return 1 }
+    if (wptr.getTab(index).surface.document.dirty) { return 1 }
     return 0
 }
 

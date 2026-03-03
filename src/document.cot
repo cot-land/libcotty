@@ -1,0 +1,164 @@
+/// Document: owns a buffer, history, selection, filepath, and dirty flag.
+/// Port of Helix's Document — the core unit of text editing state.
+///
+/// A Document is the bridge between the buffer (raw text), the history
+/// (undo/redo DAG), and the selection (cursor positions). Surface holds
+/// a pointer to a Document and delegates text mutations through it.
+///
+/// Reference: references/helix/helix-core/src/document.rs
+
+import "std/list"
+import "buffer"
+import "history"
+import "selection"
+import "transaction"
+
+/// A document: buffer + history + selection + metadata.
+struct Document {
+    buffer: Buffer,
+    history: History,
+    selection: Selection,
+    filepath: ?string,
+    dirty: bool,
+
+    /// Create an empty, untitled document.
+    static fn init() Document {
+        return Document {
+            buffer: Buffer.init(),
+            history: History.init(),
+            selection: Selection.point(0),
+            filepath: null,
+            dirty: false,
+        }
+    }
+
+    /// Create a document from file content.
+    static fn initWithContent(content: string) Document {
+        return Document {
+            buffer: Buffer.initWithContent(content),
+            history: History.init(),
+            selection: Selection.point(0),
+            filepath: null,
+            dirty: false,
+        }
+    }
+
+    /// Apply a transaction to the document.
+    /// Commits to history (computes inverse), applies to buffer,
+    /// maps selection through the changeset, and sets dirty.
+    /// cursor_before/cursor_after are for history cursor restore.
+    fn apply(txn: Transaction, cursor_before: int, cursor_after: int) void {
+        self.history.commit(txn, &self.buffer, cursor_before, cursor_after)
+        var t = txn
+        t.apply(&self.buffer)
+        // Map selection ranges through the changeset
+        var i = 0
+        while (i < self.selection.ranges.count) {
+            const r = self.selection.ranges.get(i)
+            const new_anchor = txn.mapPos(r.anchor, ASSOC_AFTER)
+            const new_head = txn.mapPos(r.head, ASSOC_AFTER)
+            self.selection.ranges.set(i, Range { anchor: new_anchor, head: new_head })
+            i += 1
+        }
+        self.dirty = true
+    }
+
+    /// Undo the last edit. Returns cursor position to restore, or -1 if at root.
+    fn undo() int {
+        return self.history.undo(&self.buffer)
+    }
+
+    /// Redo the last undone edit. Returns cursor position to restore, or -1 if no redo.
+    fn redo() int {
+        return self.history.redo(&self.buffer)
+    }
+
+    /// Buffer length in bytes.
+    fn len() int {
+        return self.buffer.len()
+    }
+
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "document init empty" {
+    var doc = Document.init()
+    @assertEq(doc.len(), 0)
+    @assertEq(doc.dirty, false)
+    @assertEq(doc.selection.len(), 1)
+    const r = doc.selection.primary()
+    @assertEq(r.anchor, 0)
+    @assertEq(r.head, 0)
+}
+
+test "document init with content" {
+    var doc = Document.initWithContent("hello")
+    @assertEq(doc.len(), 5)
+    @assertEq(doc.dirty, false)
+    @assertEq(doc.buffer.toString(), "hello")
+}
+
+test "document apply insert" {
+    var doc = Document.initWithContent("hello")
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    doc.apply(txn, 5, 11)
+    @assertEq(doc.buffer.toString(), "hello world")
+    @assertEq(doc.dirty, true)
+}
+
+test "document apply maps selection" {
+    var doc = Document.initWithContent("hello")
+    // Set selection cursor at position 5
+    doc.selection = Selection.point(5)
+    // Insert " world" at position 5
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    doc.apply(txn, 5, 11)
+    // Selection should have mapped through the insert
+    const r = doc.selection.primary()
+    @assertEq(r.anchor, 11)
+    @assertEq(r.head, 11)
+}
+
+test "document undo redo round trip" {
+    var doc = Document.initWithContent("hello")
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 5, to: 5, text: " world" })
+    var txn = Transaction.fromChanges(5, &changes)
+    doc.apply(txn, 5, 11)
+    @assertEq(doc.buffer.toString(), "hello world")
+    // Undo
+    const cursor = doc.undo()
+    @assertEq(cursor, 5)
+    @assertEq(doc.buffer.toString(), "hello")
+    // Redo
+    const cursor2 = doc.redo()
+    @assertEq(cursor2, 11)
+    @assertEq(doc.buffer.toString(), "hello world")
+}
+
+test "document dirty flag" {
+    var doc = Document.init()
+    @assertEq(doc.dirty, false)
+    var changes: List(Change) = .{}
+    changes.append(Change { from: 0, to: 0, text: "a" })
+    var txn = Transaction.fromChanges(0, &changes)
+    doc.apply(txn, 0, 1)
+    @assertEq(doc.dirty, true)
+}
+
+test "document undo at root returns -1" {
+    var doc = Document.init()
+    @assertEq(doc.undo(), -1)
+}
+
+test "document redo at leaf returns -1" {
+    var doc = Document.initWithContent("hello")
+    @assertEq(doc.redo(), -1)
+}

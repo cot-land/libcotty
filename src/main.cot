@@ -62,7 +62,7 @@ fn cmdOpen(path: string) void {
     application.addSurfaceFromFile(path)
 
     const surface = application.surfaces.get(0)
-    println("cotty: opened ${path} (${surface.buffer.len()} bytes, ${surface.buffer.lineCount()} lines)")
+    println("cotty: opened ${path} (${surface.document.buffer.len()} bytes, ${surface.document.buffer.lineCount()} lines)")
 }
 
 /// Print usage information.

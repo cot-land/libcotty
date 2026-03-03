@@ -188,7 +188,7 @@ struct Workspace {
         if (tab.is_preview) {
             self.pinTab(index)
         }
-        tab.surface.dirty = true
+        tab.surface.document.dirty = true
     }
 
     /// Compute the title for a tab into title_buf. Returns the length.
@@ -218,7 +218,7 @@ struct Workspace {
             }
         } else {
             // Editor: use filepath last component or "Untitled"
-            if (tab.surface.filepath) |path| {
+            if (tab.surface.document.filepath) |path| {
                 const name = basename(path)
                 for i in 0..name.len {
                     self.title_buf.append(name[i])
@@ -394,7 +394,7 @@ test "workspace mark dirty auto-pins preview" {
     ws.markDirty(0)
     @assertEq(ws.getTab(0).is_preview, false)
     @assertEq(ws.preview_tab_index, -1)
-    @assertEq(ws.getTab(0).surface.dirty, true)
+    @assertEq(ws.getTab(0).surface.document.dirty, true)
 }
 
 test "workspace add preview replaces existing preview" {
@@ -421,7 +421,7 @@ test "workspace editor tab title with filepath" {
     var app = App.init()
     var ws = Workspace.init(&app)
     ws.addEditorTab()
-    ws.getTabPtr(0).surface.filepath = "/foo/bar/hello.cot"
+    ws.getTabPtr(0).surface.document.filepath = "/foo/bar/hello.cot"
     const len = ws.tabTitle(0)
     @assertEq(len, 9)  // "hello.cot"
 }
