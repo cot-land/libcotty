@@ -6,10 +6,13 @@ import "std/fs"
 import "std/sys"
 import "std/string"
 import "std/thread"
+import "std/list"
 import "buffer"
 import "cursor"
 import "input"
 import "terminal"
+import "cell"
+import "config"
 import "vt_parser"
 import "pty"
 import "inspector"
@@ -17,6 +20,7 @@ import "selection"
 import "transaction"
 import "history"
 import "document"
+import "movement"
 
 // ============================================================================
 // Pipe fd unpacking (same bit ops as pty.cot)
@@ -73,18 +77,36 @@ const SurfaceKind = enum(u8) {
 }
 
 // ============================================================================
-// Character category for word movement
+// Bracket pair helpers
 // ============================================================================
 
-/// Classify a character for word movement.
-/// 0 = whitespace, 1 = word (alnum + _), 2 = punctuation
-fn charCategory(ch: int) int {
-    if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') { return 0 }
-    if (ch == '_') { return 1 }
-    if (ch >= 'a' and ch <= 'z') { return 1 }
-    if (ch >= 'A' and ch <= 'Z') { return 1 }
-    if (ch >= '0' and ch <= '9') { return 1 }
-    return 2
+/// Return the closing bracket for an opening bracket, or 0 if not an opener.
+fn closingBracketFor(ch: int) int {
+    if (ch == '(') { return ')' }
+    if (ch == '[') { return ']' }
+    if (ch == '{') { return '}' }
+    if (ch == '"') { return '"' }
+    if (ch == '\'') { return '\'' }
+    if (ch == '`') { return '`' }
+    return 0
+}
+
+/// Return the opening bracket for a closing bracket, or 0 if not a closer.
+fn openingBracketFor(ch: int) int {
+    if (ch == ')') { return '(' }
+    if (ch == ']') { return '[' }
+    if (ch == '}') { return '{' }
+    return 0
+}
+
+/// Whether a character is a closing bracket (not including quotes).
+fn isClosingBracket(ch: int) bool {
+    return ch == ')' or ch == ']' or ch == '}'
+}
+
+/// Whether a character is a paired quote.
+fn isPairedQuote(ch: int) bool {
+    return ch == '"' or ch == '\'' or ch == '`'
 }
 
 /// A single surface (tab/window).
@@ -93,6 +115,9 @@ struct Surface {
     document: Document,
     cursor: Cursor,
     scroll_offset: int,
+    scroll_accumulator: i64,
+    h_scroll_offset: int,
+    h_scroll_accumulator: i64,
     mode: Mode,
     viewport_rows: int,
     viewport_cols: int,
@@ -106,6 +131,12 @@ struct Surface {
     render_dirty: i64,
     child_exited: i64,
     inspector: Inspector,
+    render_grid: TerminalGrid,
+    cursor_visible: bool,
+    yank_buf: List(u8),
+    last_edit_kind: int,  // 0=none, 1=insert, 2=delete — for undo grouping
+    scroll_anchor: int,   // byte offset of first visible line (Zed: ScrollAnchor)
+    yank_is_linewise: bool,  // true if yank buffer represents full lines (Zed: clipboard_kind)
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
     static fn init() *Surface {
@@ -113,11 +144,15 @@ struct Surface {
         dummy_mutex.ptr = 0
         var dummy_thread: Thread = undefined
         dummy_thread.handle = 0
+        var yank: List(u8) = .{}
         return new Surface {
             kind: SurfaceKind.Editor,
             document: Document.init(),
             cursor: Cursor.init(),
             scroll_offset: 0,
+            scroll_accumulator: 0,
+            h_scroll_offset: 0,
+            h_scroll_accumulator: 0,
             mode: Mode.Insert,
             viewport_rows: 0,
             viewport_cols: 0,
@@ -131,6 +166,12 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(24, 80),
+            render_grid: TerminalGrid.init(0, 0),
+            cursor_visible: true,
+            yank_buf: yank,
+            last_edit_kind: 0,
+            scroll_anchor: 0,
+            yank_is_linewise: false,
         }
     }
 
@@ -140,13 +181,18 @@ struct Surface {
         dummy_mutex.ptr = 0
         var dummy_thread: Thread = undefined
         dummy_thread.handle = 0
+        var yank: List(u8) = .{}
         const content = readFile(path) catch {
             // File doesn't exist yet — create empty surface with path
+            var yank2: List(u8) = .{}
             var s = new Surface {
                 kind: SurfaceKind.Editor,
                 document: Document.init(),
                 cursor: Cursor.init(),
                 scroll_offset: 0,
+                scroll_accumulator: 0,
+                h_scroll_offset: 0,
+                h_scroll_accumulator: 0,
                 mode: Mode.Insert,
                 viewport_rows: 0,
                 viewport_cols: 0,
@@ -160,6 +206,12 @@ struct Surface {
                 render_dirty: 0,
                 child_exited: 0,
                 inspector: Inspector.init(24, 80),
+                render_grid: TerminalGrid.init(0, 0),
+                cursor_visible: true,
+                yank_buf: yank2,
+                last_edit_kind: 0,
+                scroll_anchor: 0,
+                yank_is_linewise: false,
             }
             s.document.filepath = path
             return s
@@ -170,6 +222,9 @@ struct Surface {
             document: Document.initWithContent(content),
             cursor: Cursor.init(),
             scroll_offset: 0,
+            scroll_accumulator: 0,
+            h_scroll_offset: 0,
+            h_scroll_accumulator: 0,
             mode: Mode.Insert,
             viewport_rows: 0,
             viewport_cols: 0,
@@ -183,6 +238,12 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(24, 80),
+            render_grid: TerminalGrid.init(0, 0),
+            cursor_visible: true,
+            yank_buf: yank,
+            last_edit_kind: 0,
+            scroll_anchor: 0,
+            yank_is_linewise: false,
         }
         s.document.filepath = path
         return s
@@ -206,12 +267,16 @@ struct Surface {
 
         var dummy_thread: Thread = undefined
         dummy_thread.handle = 0
+        var yank: List(u8) = .{}
 
         return new Surface {
             kind: SurfaceKind.Terminal,
             document: Document.init(),
             cursor: Cursor.init(),
             scroll_offset: 0,
+            scroll_accumulator: 0,
+            h_scroll_offset: 0,
+            h_scroll_accumulator: 0,
             mode: Mode.Insert,
             viewport_rows: 0,
             viewport_cols: 0,
@@ -225,6 +290,12 @@ struct Surface {
             render_dirty: 0,
             child_exited: 0,
             inspector: Inspector.init(rows, cols),
+            render_grid: TerminalGrid.init(0, 0),
+            cursor_visible: true,
+            yank_buf: yank,
+            last_edit_kind: 0,
+            scroll_anchor: 0,
+            yank_is_linewise: false,
         }
     }
 
@@ -235,74 +306,121 @@ struct Surface {
     }
 
     /// Handle an input action, dispatching by current mode.
+    /// Handle input — standard editor (non-modal).
+    /// All keys type characters, Shift+movement extends selection.
     fn handleInput(action: InputAction, key: int) void {
         switch (action) {
-            InputAction.enter_normal => {
-                self.mode = Mode.Normal
-            },
-            InputAction.enter_insert => {
-                self.mode = Mode.Insert
-            },
-            InputAction.enter_insert_after => {
-                // Move cursor one right (if possible), then enter Insert mode
-                if (self.cursor.offset < self.document.buffer.len()) {
-                    const ch = self.document.buffer.charAt(self.cursor.offset)
-                    self.cursor.offset += 1
-                    if (ch == '\n') {
-                        self.cursor.line += 1
-                        self.cursor.col = 0
+            InputAction.insert_char => {
+                self.cursor.clearGoal()
+                // Validate buffer before building changeset
+                if (g_buffer_debug) {
+                    if (!self.document.buffer.validate()) {
+                        self.document.buffer.dumpState("CORRUPT before insert_char")
+                        @trap()
+                    }
+                }
+                // Break undo group if switching from delete to insert
+                if (self.last_edit_kind != 1) { self.document.history.breakGroup() }
+                self.last_edit_kind = 1
+                // Multi-cursor: simple insert at all positions (no bracket features)
+                if (self.hasMultipleCursors()) {
+                    // Delete any non-empty selections first
+                    self.deleteSelection()
+                    self.insertAtAllCursors(key)
+                    return
+                }
+                // Single cursor: full feature set
+                const primary = self.document.selection.primary()
+                if (!primary.isEmpty()) {
+                    const surround_close = closingBracketFor(key)
+                    if (surround_close > 0) {
+                        self.document.history.breakGroup()
+                        self.surroundSelection(key, surround_close)
+                        return
+                    }
+                    self.document.history.breakGroup()
+                    self.deleteSelection()
+                    self.document.selection = Selection.point(self.cursor.offset)
+                }
+                const cursor_before = self.cursor.offset
+                if (key == '\n') {
+                    self.insertNewlineWithIndent()
+                } else {
+                    const closing = closingBracketFor(key)
+                    if (closing == 0 and isClosingBracket(key)) {
+                        if (cursor_before < self.document.buffer.len()) {
+                            if (self.document.buffer.charAt(cursor_before) == key) {
+                                self.cursor.offset = cursor_before + 1
+                                self.cursor.col += 1
+                                self.document.selection = Selection.point(self.cursor.offset)
+                                return
+                            }
+                        }
+                    }
+                    if (closing > 0) {
+                        var cs = ChangeSet.init()
+                        if (cursor_before > 0) { cs.retain(cursor_before) }
+                        cs.insertByte(key)
+                        cs.insertByte(closing)
+                        const rest = self.document.buffer.len() - cursor_before
+                        if (rest > 0) { cs.retain(rest) }
+                        var txn = Transaction { changes: cs }
+                        const cursor_after = cursor_before + 1
+                        self.document.apply(txn, cursor_before, cursor_after)
+                        self.cursor.offset = cursor_after
+                        self.cursor.col += 1
                     } else {
+                        var cs = ChangeSet.init()
+                        if (cursor_before > 0) { cs.retain(cursor_before) }
+                        cs.insertByte(key)
+                        const rest = self.document.buffer.len() - cursor_before
+                        if (rest > 0) { cs.retain(rest) }
+                        var txn = Transaction { changes: cs }
+                        const cursor_after = cursor_before + 1
+                        self.document.apply(txn, cursor_before, cursor_after)
+                        self.cursor.offset = cursor_after
                         self.cursor.col += 1
                     }
                 }
-                self.mode = Mode.Insert
-            },
-            InputAction.enter_select => {
-                self.mode = Mode.Select
-            },
-            else => {
-                if (self.mode == Mode.Insert) {
-                    self.handleInsertMode(action, key)
-                } else if (self.mode == Mode.Normal) {
-                    self.handleNormalMode(action, key)
-                }
-            },
-        }
-    }
-
-    /// Handle input in Insert mode — current behavior (insert/delete/move/undo/redo).
-    fn handleInsertMode(action: InputAction, key: int) void {
-        switch (action) {
-            InputAction.insert_char => {
-                const cursor_before = self.cursor.offset
-                // Build transaction: retain up to cursor, insert byte, retain rest
-                var cs = ChangeSet.init()
-                if (cursor_before > 0) { cs.retain(cursor_before) }
-                cs.insertByte(key)
-                const rest = self.document.buffer.len() - cursor_before
-                if (rest > 0) { cs.retain(rest) }
-                var txn = Transaction { changes: cs }
-                // Compute cursor_after
-                var cursor_after = cursor_before + 1
-                self.document.apply(txn, cursor_before, cursor_after)
-                // Update cursor
-                self.cursor.offset = cursor_after
-                self.cursor.col += 1
-                if (key == '\n') {
-                    self.cursor.line += 1
-                    self.cursor.col = 0
-                }
             },
             InputAction.delete_back => {
+                self.cursor.clearGoal()
+                if (self.last_edit_kind != 2) { self.document.history.breakGroup() }
+                self.last_edit_kind = 2
+                // Multi-cursor: simple delete at all positions
+                if (self.hasMultipleCursors()) {
+                    self.deleteSelection()
+                    self.deleteBackAtAllCursors()
+                    return
+                }
+                // Single cursor: full feature set (bracket pair delete)
+                const primary_del = self.document.selection.primary()
+                if (!primary_del.isEmpty()) {
+                    self.deleteSelection()
+                    self.document.selection = Selection.point(self.cursor.offset)
+                    return
+                }
                 if (self.cursor.offset > 0) {
                     const cursor_before = self.cursor.offset
                     const deleted_char = self.document.buffer.charAt(cursor_before - 1)
-                    // Build transaction: retain to pos-1, delete 1, retain rest
+                    const expected_close = closingBracketFor(deleted_char)
+                    var delete_pair = false
+                    if (expected_close > 0 and cursor_before < self.document.buffer.len()) {
+                        if (self.document.buffer.charAt(cursor_before) == expected_close) {
+                            delete_pair = true
+                        }
+                    }
                     var cs = ChangeSet.init()
                     if (cursor_before > 1) { cs.retain(cursor_before - 1) }
-                    cs.delete(1)
-                    const rest = self.document.buffer.len() - cursor_before
-                    if (rest > 0) { cs.retain(rest) }
+                    if (delete_pair) {
+                        cs.delete(2)
+                        const rest = self.document.buffer.len() - cursor_before - 1
+                        if (rest > 0) { cs.retain(rest) }
+                    } else {
+                        cs.delete(1)
+                        const rest = self.document.buffer.len() - cursor_before
+                        if (rest > 0) { cs.retain(rest) }
+                    }
                     var txn = Transaction { changes: cs }
                     const cursor_after = cursor_before - 1
                     self.document.apply(txn, cursor_before, cursor_after)
@@ -314,10 +432,29 @@ struct Surface {
                     }
                 }
             },
+            InputAction.move_left => { self.moveAllCursors(InputAction.move_left) },
+            InputAction.move_right => { self.moveAllCursors(InputAction.move_right) },
+            InputAction.move_up => { self.moveAllCursors(InputAction.move_up) },
+            InputAction.move_down => { self.moveAllCursors(InputAction.move_down) },
+            InputAction.move_line_start => { self.moveAllCursors(InputAction.move_line_start) },
+            InputAction.move_line_end => { self.moveAllCursors(InputAction.move_line_end) },
             InputAction.delete_forward => {
+                self.cursor.clearGoal()
+                if (self.last_edit_kind != 2) { self.document.history.breakGroup() }
+                self.last_edit_kind = 2
+                if (self.hasMultipleCursors()) {
+                    self.deleteSelection()
+                    self.deleteForwardAtAllCursors()
+                    return
+                }
+                const primary_df = self.document.selection.primary()
+                if (!primary_df.isEmpty()) {
+                    self.deleteSelection()
+                    self.document.selection = Selection.point(self.cursor.offset)
+                    return
+                }
                 if (self.cursor.offset < self.document.buffer.len()) {
                     const cursor_before = self.cursor.offset
-                    // Build transaction: retain to pos, delete 1, retain rest
                     var cs = ChangeSet.init()
                     if (cursor_before > 0) { cs.retain(cursor_before) }
                     cs.delete(1)
@@ -327,104 +464,709 @@ struct Surface {
                     self.document.apply(txn, cursor_before, cursor_before)
                 }
             },
+            InputAction.delete_selection => {
+                self.deleteSelection()
+                self.document.selection = Selection.point(self.cursor.offset)
+            },
+            InputAction.yank => {
+                self.yankSelection()
+            },
+            InputAction.change_selection => {
+                self.deleteSelection()
+                self.document.selection = Selection.point(self.cursor.offset)
+            },
             InputAction.undo => {
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
                 self.performUndo()
+                self.document.selection = Selection.point(self.cursor.offset)
             },
             InputAction.redo => {
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
                 self.performRedo()
+                self.document.selection = Selection.point(self.cursor.offset)
             },
-            else => {
-                self.handleMovement(action)
+            // Select actions — extend selection from anchor (multi-cursor aware)
+            InputAction.select_left => { self.extendAllSelections(InputAction.move_left) },
+            InputAction.select_right => { self.extendAllSelections(InputAction.move_right) },
+            InputAction.select_up => { self.extendAllSelections(InputAction.move_up) },
+            InputAction.select_down => { self.extendAllSelections(InputAction.move_down) },
+            InputAction.select_line_start => { self.extendAllSelections(InputAction.move_line_start) },
+            InputAction.select_line_end => { self.extendAllSelections(InputAction.move_line_end) },
+            InputAction.select_word_forward => { self.extendAllSelections(InputAction.move_word_forward) },
+            InputAction.select_word_backward => { self.extendAllSelections(InputAction.move_word_backward) },
+            InputAction.select_all => {
+                const buf_len = self.document.buffer.len()
+                self.document.selection = Selection.init(0, buf_len)
+                self.cursor.offset = buf_len
+                self.recomputeLineCol()
             },
-        }
-    }
-
-    /// Handle input in Normal mode — movement + mode transitions + word movement + undo/redo.
-    fn handleNormalMode(action: InputAction, key: int) void {
-        switch (action) {
-            InputAction.undo => {
-                self.performUndo()
+            InputAction.move_word_forward => { self.moveAllCursors(InputAction.move_word_forward) },
+            InputAction.move_word_backward => { self.moveAllCursors(InputAction.move_word_backward) },
+            InputAction.move_word_end => { self.moveAllCursors(InputAction.move_word_forward) },
+            InputAction.add_next_occurrence => {
+                self.addNextOccurrence()
             },
-            InputAction.redo => {
-                self.performRedo()
-            },
-            InputAction.move_word_forward => {
-                self.moveWordForward()
-            },
-            InputAction.move_word_backward => {
-                self.moveWordBackward()
-            },
-            InputAction.move_word_end => {
-                self.moveWordEnd()
-            },
-            else => {
-                self.handleMovement(action)
-            },
-        }
-    }
-
-    /// Handle movement actions (shared by Insert and Normal mode).
-    fn handleMovement(action: InputAction) void {
-        switch (action) {
-            InputAction.move_left => {
-                if (self.cursor.offset > 0) {
-                    self.cursor.offset -= 1
-                    if (self.cursor.col > 0) {
-                        self.cursor.col -= 1
-                    } else {
-                        self.recomputeLineCol()
-                    }
+            InputAction.collapse_cursors => {
+                // Escape: collapse to single primary cursor, collapse selection
+                if (self.hasMultipleCursors()) {
+                    self.collapseToPrimaryCursor()
+                } else {
+                    // Single cursor: just collapse selection
+                    self.document.selection = Selection.point(self.cursor.offset)
                 }
-            },
-            InputAction.move_right => {
-                if (self.cursor.offset < self.document.buffer.len()) {
-                    const ch = self.document.buffer.charAt(self.cursor.offset)
-                    self.cursor.offset += 1
-                    if (ch == '\n') {
-                        self.cursor.line += 1
-                        self.cursor.col = 0
-                    } else {
-                        self.cursor.col += 1
-                    }
-                }
-            },
-            InputAction.move_up => {
-                if (self.cursor.line > 0) {
-                    const target_col = self.cursor.col
-                    self.cursor.line -= 1
-                    const line_len = self.document.buffer.lineLength(self.cursor.line)
-                    if (target_col < line_len) {
-                        self.cursor.col = target_col
-                    } else {
-                        self.cursor.col = line_len
-                    }
-                    self.recomputeOffset()
-                }
-            },
-            InputAction.move_down => {
-                const total_lines = self.document.buffer.lineCount()
-                if (self.cursor.line < total_lines - 1) {
-                    const target_col = self.cursor.col
-                    self.cursor.line += 1
-                    const line_len = self.document.buffer.lineLength(self.cursor.line)
-                    if (target_col < line_len) {
-                        self.cursor.col = target_col
-                    } else {
-                        self.cursor.col = line_len
-                    }
-                    self.recomputeOffset()
-                }
-            },
-            InputAction.move_line_start => {
-                self.cursor.col = 0
-                self.recomputeOffset()
-            },
-            InputAction.move_line_end => {
-                self.cursor.col = self.document.buffer.lineLength(self.cursor.line)
-                self.recomputeOffset()
             },
             else => {},
         }
+    }
+
+    // =====================================================================
+    // Multi-cursor support
+    // =====================================================================
+
+    /// Sync self.cursor (line/col/offset) from the primary selection range.
+    fn syncCursorFromPrimary() void {
+        const primary = self.document.selection.primary()
+        self.cursor.offset = primary.head
+        self.recomputeLineCol()
+    }
+
+    /// Move a byte offset left by one position.
+    fn moveOffsetLeft(offset: int) int {
+        if (offset > 0) { return offset - 1 }
+        return 0
+    }
+
+    /// Move a byte offset right by one position.
+    fn moveOffsetRight(offset: int) int {
+        if (offset < self.document.buffer.len()) { return offset + 1 }
+        return self.document.buffer.len()
+    }
+
+    /// Move a byte offset up one line, targeting the same column.
+    fn moveOffsetUp(offset: int) int {
+        const line = self.offsetToLine(offset)
+        if (line == 0) { return offset }
+        const col = offset - self.document.buffer.lineStartOffset(line)
+        const target_line = line - 1
+        const target_line_len = self.document.buffer.lineLength(target_line)
+        var target_col = col
+        if (target_col > target_line_len) { target_col = target_line_len }
+        return self.document.buffer.lineStartOffset(target_line) + target_col
+    }
+
+    /// Move a byte offset down one line, targeting the same column.
+    fn moveOffsetDown(offset: int) int {
+        const line = self.offsetToLine(offset)
+        const total = self.document.buffer.lineCount()
+        if (line >= total - 1) { return offset }
+        const col = offset - self.document.buffer.lineStartOffset(line)
+        const target_line = line + 1
+        const target_line_len = self.document.buffer.lineLength(target_line)
+        var target_col = col
+        if (target_col > target_line_len) { target_col = target_line_len }
+        return self.document.buffer.lineStartOffset(target_line) + target_col
+    }
+
+    /// Move a byte offset to the start of its line.
+    fn moveOffsetLineStart(offset: int) int {
+        const line = self.offsetToLine(offset)
+        return self.document.buffer.lineStartOffset(line)
+    }
+
+    /// Move a byte offset to the end of its line.
+    fn moveOffsetLineEnd(offset: int) int {
+        const line = self.offsetToLine(offset)
+        return self.document.buffer.lineStartOffset(line) + self.document.buffer.lineLength(line)
+    }
+
+    /// Move a byte offset forward by one word (inline charCategory to avoid compiler bug).
+    fn moveOffsetWordForward(offset: int) int {
+        const buf_len = self.document.buffer.len()
+        if (offset >= buf_len) { return buf_len }
+        var pos = offset
+        const start_cat = charCategory(self.document.buffer.charAt(pos))
+        while (pos < buf_len) {
+            if (charCategory(self.document.buffer.charAt(pos)) != start_cat) { break }
+            pos += 1
+        }
+        while (pos < buf_len) {
+            if (charCategory(self.document.buffer.charAt(pos)) != 0) { break }
+            pos += 1
+        }
+        return pos
+    }
+
+    /// Move a byte offset backward by one word.
+    fn moveOffsetWordBackward(offset: int) int {
+        if (offset == 0) { return 0 }
+        var pos = offset - 1
+        while (pos > 0) {
+            if (charCategory(self.document.buffer.charAt(pos)) != 0) { break }
+            pos -= 1
+        }
+        const cat = charCategory(self.document.buffer.charAt(pos))
+        while (pos > 0) {
+            if (charCategory(self.document.buffer.charAt(pos - 1)) != cat) { break }
+            pos -= 1
+        }
+        return pos
+    }
+
+    /// Move a byte offset up one line using a specific goal column.
+    fn moveOffsetUpWithGoal(offset: int, goal_col: int) int {
+        const line = self.offsetToLine(offset)
+        if (line == 0) { return offset }
+        const target_line = line - 1
+        const target_line_len = self.document.buffer.lineLength(target_line)
+        var target_col = goal_col
+        if (target_col > target_line_len) { target_col = target_line_len }
+        return self.document.buffer.lineStartOffset(target_line) + target_col
+    }
+
+    /// Move a byte offset down one line using a specific goal column.
+    fn moveOffsetDownWithGoal(offset: int, goal_col: int) int {
+        const line = self.offsetToLine(offset)
+        const total = self.document.buffer.lineCount()
+        if (line >= total - 1) { return offset }
+        const target_line = line + 1
+        const target_line_len = self.document.buffer.lineLength(target_line)
+        var target_col = goal_col
+        if (target_col > target_line_len) { target_col = target_line_len }
+        return self.document.buffer.lineStartOffset(target_line) + target_col
+    }
+
+    /// Apply a movement action to ALL selection ranges (multi-cursor aware).
+    /// Each range head is moved independently, ranges collapse to points.
+    /// Selection is normalized after (overlapping cursors merge).
+    /// Primary cursor uses goal_col for vertical movement.
+    fn moveAllCursors(action: InputAction) void {
+        self.document.history.breakGroup()
+        self.last_edit_kind = 0
+        // For vertical movement, use goal_col on primary cursor
+        const is_vertical = (action == InputAction.move_up or action == InputAction.move_down)
+        if (is_vertical) {
+            self.cursor.ensureGoal()
+        } else {
+            self.cursor.clearGoal()
+        }
+        const primary_idx = self.document.selection.primary_index
+        const goal = self.cursor.effectiveGoal()
+        var i: i64 = 0
+        while (i < self.document.selection.ranges.count) {
+            const r = self.document.selection.ranges.get(i)
+            const head = r.head
+            var new_head = head
+            switch (action) {
+                InputAction.move_left => { new_head = self.moveOffsetLeft(head) },
+                InputAction.move_right => { new_head = self.moveOffsetRight(head) },
+                InputAction.move_up => {
+                    if (i == primary_idx) {
+                        new_head = self.moveOffsetUpWithGoal(head, goal)
+                    } else {
+                        new_head = self.moveOffsetUp(head)
+                    }
+                },
+                InputAction.move_down => {
+                    if (i == primary_idx) {
+                        new_head = self.moveOffsetDownWithGoal(head, goal)
+                    } else {
+                        new_head = self.moveOffsetDown(head)
+                    }
+                },
+                InputAction.move_line_start => { new_head = self.moveOffsetLineStart(head) },
+                InputAction.move_line_end => { new_head = self.moveOffsetLineEnd(head) },
+                InputAction.move_word_forward => { new_head = self.moveOffsetWordForward(head) },
+                InputAction.move_word_backward => { new_head = self.moveOffsetWordBackward(head) },
+                else => {},
+            }
+            self.document.selection.replace(i, Range { anchor: new_head, head: new_head })
+            i += 1
+        }
+        self.document.selection.normalize()
+        self.syncCursorFromPrimary()
+        // Preserve goal_col state through vertical movement
+        if (!is_vertical) { self.cursor.clearGoal() }
+    }
+
+    /// Extend selection at ALL ranges by a movement action (multi-cursor aware).
+    /// Each range head moves, anchor stays. Normalized after.
+    fn extendAllSelections(action: InputAction) void {
+        self.document.history.breakGroup()
+        self.last_edit_kind = 0
+        var i: i64 = 0
+        while (i < self.document.selection.ranges.count) {
+            const r = self.document.selection.ranges.get(i)
+            var anchor = r.anchor
+            if (r.isEmpty()) {
+                anchor = r.head
+            }
+            const head = r.head
+            var new_head = head
+            switch (action) {
+                InputAction.move_left => { new_head = self.moveOffsetLeft(head) },
+                InputAction.move_right => { new_head = self.moveOffsetRight(head) },
+                InputAction.move_up => { new_head = self.moveOffsetUp(head) },
+                InputAction.move_down => { new_head = self.moveOffsetDown(head) },
+                InputAction.move_line_start => { new_head = self.moveOffsetLineStart(head) },
+                InputAction.move_line_end => { new_head = self.moveOffsetLineEnd(head) },
+                InputAction.move_word_forward => { new_head = self.moveOffsetWordForward(head) },
+                InputAction.move_word_backward => { new_head = self.moveOffsetWordBackward(head) },
+                else => {},
+            }
+            self.document.selection.replace(i, Range { anchor: anchor, head: new_head })
+            i += 1
+        }
+        self.document.selection.normalize()
+        self.syncCursorFromPrimary()
+    }
+
+    /// Insert a character at ALL cursor positions (multi-cursor aware).
+    /// Builds a single transaction with inserts at all cursor offsets (sorted ascending).
+    fn insertAtAllCursors(key: int) void {
+        // Collect cursor offsets sorted (selection ranges are already sorted by from())
+        const range_count = self.document.selection.ranges.count
+        if (range_count == 0) { return }
+        // Build changeset: for each cursor, retain(gap), insert(key)
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        var i: i64 = 0
+        while (i < range_count) {
+            const r = self.document.selection.ranges.get(i)
+            const pos = r.head
+            const gap = pos - prev_offset
+            if (gap > 0) { cs.retain(gap) }
+            cs.insertByte(key)
+            prev_offset = pos
+            i += 1
+        }
+        const rest = self.document.buffer.len() - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        const cursor_before = self.cursor.offset
+        self.document.apply(txn, cursor_before, cursor_before + 1)
+        self.syncCursorFromPrimary()
+    }
+
+    /// Delete one character backward at ALL cursor positions (multi-cursor aware).
+    /// Builds a single transaction with deletes at all cursor offsets.
+    fn deleteBackAtAllCursors() void {
+        const range_count = self.document.selection.ranges.count
+        if (range_count == 0) { return }
+        // Build changeset: for each cursor, retain(gap), delete(1)
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        var any_deleted = false
+        var i: i64 = 0
+        while (i < range_count) {
+            const r = self.document.selection.ranges.get(i)
+            const pos = r.head
+            if (pos > 0) {
+                const gap = (pos - 1) - prev_offset
+                if (gap > 0) { cs.retain(gap) }
+                cs.delete(1)
+                prev_offset = pos
+                any_deleted = true
+            }
+            i += 1
+        }
+        if (!any_deleted) { return }
+        const rest = self.document.buffer.len() - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        const cursor_before = self.cursor.offset
+        var cursor_after = cursor_before
+        if (cursor_before > 0) { cursor_after = cursor_before - 1 }
+        self.document.apply(txn, cursor_before, cursor_after)
+        self.syncCursorFromPrimary()
+    }
+
+    /// Delete one character forward at ALL cursor positions (multi-cursor aware).
+    fn deleteForwardAtAllCursors() void {
+        const range_count = self.document.selection.ranges.count
+        if (range_count == 0) { return }
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        var any_deleted = false
+        const buf_len = self.document.buffer.len()
+        var i: i64 = 0
+        while (i < range_count) {
+            const r = self.document.selection.ranges.get(i)
+            const pos = r.head
+            if (pos < buf_len) {
+                const gap = pos - prev_offset
+                if (gap > 0) { cs.retain(gap) }
+                cs.delete(1)
+                prev_offset = pos + 1
+                any_deleted = true
+            }
+            i += 1
+        }
+        if (!any_deleted) { return }
+        const rest = buf_len - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        const cursor_before = self.cursor.offset
+        self.document.apply(txn, cursor_before, cursor_before)
+        self.syncCursorFromPrimary()
+    }
+
+    /// Add a new cursor at the given byte offset.
+    fn addCursorAt(offset: int) void {
+        self.document.selection.push(Range { anchor: offset, head: offset })
+        self.syncCursorFromPrimary()
+    }
+
+    /// Find next occurrence of the selected text (or word under cursor) and add a selection.
+    /// Used by Cmd+D. If nothing is selected, selects the word under cursor first.
+    fn addNextOccurrence() void {
+        const primary = self.document.selection.primary()
+        if (primary.isEmpty()) {
+            // Select word under cursor first
+            const offset = self.cursor.offset
+            const buf_len = self.document.buffer.len()
+            if (buf_len == 0) { return }
+            var pos = offset
+            if (pos >= buf_len) { pos = buf_len - 1 }
+            const cat = charCategory(self.document.buffer.charAt(pos))
+            if (cat == 0) { return }  // On whitespace, do nothing
+            // Find word start
+            var word_start = pos
+            while (word_start > 0) {
+                if (charCategory(self.document.buffer.charAt(word_start - 1)) != cat) { break }
+                word_start -= 1
+            }
+            // Find word end
+            var word_end = pos + 1
+            while (word_end < buf_len) {
+                if (charCategory(self.document.buffer.charAt(word_end)) != cat) { break }
+                word_end += 1
+            }
+            // Select this word
+            self.document.selection.replace(self.document.selection.primary_index,
+                Range { anchor: word_start, head: word_end })
+            self.syncCursorFromPrimary()
+            return
+        }
+        // Find next occurrence of selected text after the last range
+        const sel_from = primary.from()
+        const sel_to = primary.to()
+        const sel_len = sel_to - sel_from
+        if (sel_len == 0) { return }
+        // Search starting after the last selection range's end
+        var last_end: i64 = 0
+        var i: i64 = 0
+        while (i < self.document.selection.ranges.count) {
+            const r = self.document.selection.ranges.get(i)
+            if (r.to() > last_end) { last_end = r.to() }
+            i += 1
+        }
+        const buf_len = self.document.buffer.len()
+        var search_pos = last_end
+        while (search_pos + sel_len <= buf_len) {
+            // Check if text at search_pos matches
+            var match = true
+            var j: i64 = 0
+            while (j < sel_len) {
+                if (self.document.buffer.charAt(search_pos + j) != self.document.buffer.charAt(sel_from + j)) {
+                    match = false
+                    break
+                }
+                j += 1
+            }
+            if (match) {
+                // Add this occurrence as a new selection
+                self.document.selection.push(Range { anchor: search_pos, head: search_pos + sel_len })
+                self.syncCursorFromPrimary()
+                return
+            }
+            search_pos += 1
+        }
+        // Wrap around: search from beginning
+        search_pos = 0
+        while (search_pos + sel_len <= last_end) {
+            var match = true
+            var j: i64 = 0
+            while (j < sel_len) {
+                if (self.document.buffer.charAt(search_pos + j) != self.document.buffer.charAt(sel_from + j)) {
+                    match = false
+                    break
+                }
+                j += 1
+            }
+            if (match) {
+                self.document.selection.push(Range { anchor: search_pos, head: search_pos + sel_len })
+                self.syncCursorFromPrimary()
+                return
+            }
+            search_pos += 1
+        }
+    }
+
+    /// Check if we have multiple cursors.
+    fn hasMultipleCursors() bool {
+        return self.document.selection.ranges.count > 1
+    }
+
+    /// Collapse to single primary cursor (Escape key).
+    fn collapseToPrimaryCursor() void {
+        self.document.selection.intoSingle()
+        self.syncCursorFromPrimary()
+    }
+
+    /// Delete the text covered by the primary selection range.
+    /// Builds a transaction: retain(from), delete(to-from), retain(rest).
+    fn deleteSelection() void {
+        const primary = self.document.selection.primary()
+        if (primary.isEmpty()) { return }
+        const from = primary.from()
+        const to = primary.to()
+        const del_len = to - from
+        const cursor_before = self.cursor.offset
+        var cs = ChangeSet.init()
+        if (from > 0) { cs.retain(from) }
+        cs.delete(del_len)
+        const rest = self.document.buffer.len() - to
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        self.document.apply(txn, cursor_before, from)
+        self.cursor.offset = from
+        self.recomputeLineCol()
+    }
+
+    /// Copy the primary selection text into yank_buf.
+    /// Detects linewise selections (starts at line start, ends at line start/end-of-buffer).
+    fn yankSelection() void {
+        const primary = self.document.selection.primary()
+        if (primary.isEmpty()) { return }
+        const from = primary.from()
+        const to = primary.to()
+        // Clear and fill yank buffer
+        self.yank_buf.count = 0
+        var i = from
+        while (i < to) {
+            const ch = self.document.buffer.charAt(i)
+            self.yank_buf.append(@intCast(u8, ch))
+            i += 1
+        }
+        // Detect linewise: selection starts at col 0 and ends at a line boundary
+        var starts_at_line_start = false
+        if (from == 0) {
+            starts_at_line_start = true
+        } else if (self.document.buffer.charAt(from - 1) == '\n') {
+            starts_at_line_start = true
+        }
+        var ends_at_line_boundary = false
+        if (to == self.document.buffer.len()) {
+            // End of buffer counts if there's content
+            if (to > from) { ends_at_line_boundary = true }
+        } else if (to > 0 and self.document.buffer.charAt(to - 1) == '\n') {
+            ends_at_line_boundary = true
+        }
+        self.yank_is_linewise = starts_at_line_start and ends_at_line_boundary
+    }
+
+    /// Smart paste: single-transaction insert with linewise and indent awareness.
+    /// - If selection is non-empty, deletes it first.
+    /// - If the yank buffer is linewise, inserts on a new line below cursor.
+    /// - Adjusts indentation of pasted text to match cursor context.
+    fn editorPaste(text_ptr: *u8, text_len: int) void {
+        if (text_len == 0) { return }
+        self.document.history.breakGroup()
+        self.last_edit_kind = 0
+        self.cursor.clearGoal()
+        // Delete selection if non-empty
+        const primary = self.document.selection.primary()
+        if (!primary.isEmpty()) {
+            self.deleteSelection()
+            self.document.selection = Selection.point(self.cursor.offset)
+        }
+        // Determine indentation context at cursor
+        const cursor_line_start = self.document.buffer.lineStartOffset(self.cursor.line)
+        var target_indent = 0
+        var scan = cursor_line_start
+        while (scan < self.document.buffer.len()) {
+            const ch = self.document.buffer.charAt(scan)
+            if (ch != ' ' and ch != '\t') { break }
+            target_indent += 1
+            scan += 1
+        }
+        // Find base indentation of pasted text (minimum non-empty line indent)
+        var paste_base_indent = 9999
+        var line_indent = 0
+        var line_has_content = false
+        var at_line_start = true
+        for pi in 0..text_len {
+            const ch = @intToPtr(*u8, @ptrToInt(text_ptr) + pi).*
+            if (ch == '\n') {
+                if (line_has_content and line_indent < paste_base_indent) {
+                    paste_base_indent = line_indent
+                }
+                line_indent = 0
+                line_has_content = false
+                at_line_start = true
+            } else if (at_line_start and (ch == ' ' or ch == '\t')) {
+                line_indent += 1
+            } else {
+                line_has_content = true
+                at_line_start = false
+            }
+        }
+        // Handle last line (no trailing newline)
+        if (line_has_content and line_indent < paste_base_indent) {
+            paste_base_indent = line_indent
+        }
+        if (paste_base_indent == 9999) { paste_base_indent = 0 }
+        // Build the adjusted paste content into a temporary buffer
+        var paste_buf: List(u8) = .{}
+        if (self.yank_is_linewise) {
+            // Linewise: insert newline, then adjusted text on new lines
+            paste_buf.append('\n')
+        }
+        var p_at_line_start = true
+        var p_indent_skipped = 0
+        for pi in 0..text_len {
+            const ch = @intCast(int, @intToPtr(*u8, @ptrToInt(text_ptr) + pi).*)
+            if (ch == '\n') {
+                paste_buf.append('\n')
+                p_at_line_start = true
+                p_indent_skipped = 0
+            } else if (p_at_line_start and (ch == ' ' or ch == '\t') and p_indent_skipped < paste_base_indent) {
+                // Skip base indent characters
+                p_indent_skipped += 1
+            } else {
+                if (p_at_line_start) {
+                    // Emit target indentation
+                    for ti in 0..target_indent {
+                        paste_buf.append(' ')
+                    }
+                    p_at_line_start = false
+                }
+                paste_buf.append(@intCast(u8, ch))
+            }
+        }
+        // Handle linewise: strip trailing newline if text already ends with one
+        if (self.yank_is_linewise and paste_buf.count > 0) {
+            const last = paste_buf.get(paste_buf.count - 1)
+            if (last == '\n') {
+                paste_buf.count -= 1
+            }
+        }
+        // Build transaction: retain(before) + insert(paste_buf) + retain(rest)
+        const cursor_before = self.cursor.offset
+        var insert_at = cursor_before
+        if (self.yank_is_linewise) {
+            // Insert after current line end
+            insert_at = self.document.buffer.lineStartOffset(self.cursor.line) + self.document.buffer.lineLength(self.cursor.line)
+        }
+        var cs = ChangeSet.init()
+        if (insert_at > 0) { cs.retain(insert_at) }
+        for bi in 0..paste_buf.count {
+            cs.insertByte(paste_buf.get(bi))
+        }
+        const rest = self.document.buffer.len() - insert_at
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        const cursor_after = insert_at + paste_buf.count
+        self.document.apply(txn, cursor_before, cursor_after)
+        self.cursor.offset = cursor_after
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+        self.document.history.breakGroup()
+    }
+
+    /// Surround the current selection with opening and closing characters.
+    /// E.g., selecting "hello" and typing ( produces "(hello)" with selection preserved.
+    fn surroundSelection(open: int, close: int) void {
+        const primary = self.document.selection.primary()
+        if (primary.isEmpty()) { return }
+        const from = primary.from()
+        const to = primary.to()
+        const cursor_before = self.cursor.offset
+        // Build transaction: retain(from), insert(open), retain(sel_len), insert(close), retain(rest)
+        var cs = ChangeSet.init()
+        if (from > 0) { cs.retain(from) }
+        cs.insertByte(open)
+        cs.retain(to - from)
+        cs.insertByte(close)
+        const rest = self.document.buffer.len() - to
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        self.document.apply(txn, cursor_before, to + 2)
+        // Update selection to cover the wrapped text (between brackets)
+        self.document.selection = Selection.init(from + 1, to + 1)
+        self.cursor.offset = to + 1
+        self.recomputeLineCol()
+    }
+
+    /// Insert a newline with auto-indentation (Zed-style).
+    /// Inherits whitespace from current line. Adds indent after { ( [ :.
+    /// If closing bracket follows cursor, adds dedented closing line.
+    fn insertNewlineWithIndent() void {
+        const cursor_before = self.cursor.offset
+        // Get leading whitespace of current line
+        const line_start = self.document.buffer.lineStartOffset(self.cursor.line)
+        var indent_len = 0
+        var scan = line_start
+        while (scan < self.document.buffer.len()) {
+            const ch = self.document.buffer.charAt(scan)
+            if (ch != ' ' and ch != '\t') { break }
+            indent_len += 1
+            scan += 1
+        }
+        // Check if char before cursor is an indent-opener
+        var extra_indent = false
+        if (cursor_before > 0) {
+            const prev_ch = self.document.buffer.charAt(cursor_before - 1)
+            if (prev_ch == '{' or prev_ch == '(' or prev_ch == '[' or prev_ch == ':') {
+                extra_indent = true
+            }
+        }
+        // Check if char after cursor is a closing bracket
+        var close_bracket = false
+        if (extra_indent and cursor_before < self.document.buffer.len()) {
+            const next_ch = self.document.buffer.charAt(cursor_before)
+            if (next_ch == '}' or next_ch == ')' or next_ch == ']') {
+                close_bracket = true
+            }
+        }
+        // Build insertion text: \n + indent [+ extra spaces] [+ \n + indent]
+        var insert_text: List(u8) = .{}
+        insert_text.append('\n')
+        // Copy base indentation
+        var j = 0
+        while (j < indent_len) {
+            insert_text.append(@intCast(u8, self.document.buffer.charAt(line_start + j)))
+            j += 1
+        }
+        if (extra_indent) {
+            // Add one indent level (4 spaces)
+            insert_text.append(' ')
+            insert_text.append(' ')
+            insert_text.append(' ')
+            insert_text.append(' ')
+        }
+        const cursor_after = cursor_before + insert_text.count
+        if (close_bracket) {
+            // Add closing line: \n + base indent
+            insert_text.append('\n')
+            var k = 0
+            while (k < indent_len) {
+                insert_text.append(@intCast(u8, self.document.buffer.charAt(line_start + k)))
+                k += 1
+            }
+        }
+        // Build changeset
+        var cs = ChangeSet.init()
+        if (cursor_before > 0) { cs.retain(cursor_before) }
+        cs.insert(@string(insert_text.items, insert_text.count))
+        const rest = self.document.buffer.len() - cursor_before
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        self.document.apply(txn, cursor_before, cursor_after)
+        self.cursor.offset = cursor_after
+        self.recomputeLineCol()
     }
 
     /// Perform undo via Document, update cursor.
@@ -451,75 +1193,481 @@ struct Surface {
         }
     }
 
-    /// Move cursor forward by one word (w in vim).
-    /// Skip current category, skip whitespace, land on next word start.
-    fn moveWordForward() void {
-        const buf_len = self.document.buffer.len()
-        if (self.cursor.offset >= buf_len) { return }
-        var pos = self.cursor.offset
-        // Get category of current char
-        const start_cat = charCategory(self.document.buffer.charAt(pos))
-        // Skip characters of the same category
-        while (pos < buf_len) {
-            const cat = charCategory(self.document.buffer.charAt(pos))
-            if (cat != start_cat) { break }
-            pos += 1
+    // ========================================================================
+    // Editor Grid Rendering
+    // ========================================================================
+
+    /// Write a string into the render grid at (row, col) with RGB color.
+    /// Returns the column after the last character written.
+    fn gridWriteStr(row: i64, col: i64, s: string, r: i64, g: i64, b: i64) i64 {
+        if (row < 0 or row >= self.viewport_rows) { return col }
+        for i in 0..s.len {
+            if (col + i >= self.viewport_cols) { return col + i }
+            const c = self.render_grid.getCell(row, col + i)
+            c.codepoint = s[i]
+            c.fg_type = COLOR_RGB
+            c.fg_val = packRgb(r, g, b)
         }
-        // Skip whitespace
-        while (pos < buf_len) {
-            const cat = charCategory(self.document.buffer.charAt(pos))
-            if (cat != 0) { break }
-            pos += 1
-        }
-        self.cursor.offset = pos
-        self.recomputeLineCol()
+        return col + s.len
     }
 
-    /// Move cursor backward by one word (b in vim).
-    /// Skip whitespace backward, then skip word backward.
-    fn moveWordBackward() void {
-        if (self.cursor.offset == 0) { return }
-        var pos = self.cursor.offset - 1
-        // Skip whitespace backward
-        while (pos > 0) {
-            const cat = charCategory(self.document.buffer.charAt(pos))
-            if (cat != 0) { break }
-            pos -= 1
+    /// Fill cells in a row with a background color.
+    fn gridFillBg(row: i64, col_start: i64, col_end: i64, r: i64, g: i64, b: i64) void {
+        if (row < 0 or row >= self.viewport_rows) { return }
+        const end = if (col_end > self.viewport_cols) { self.viewport_cols } else { col_end }
+        for col in col_start..end {
+            const c = self.render_grid.getCell(row, col)
+            c.bg_type = COLOR_RGB
+            c.bg_val = packRgb(r, g, b)
         }
-        // Get the category at current position and skip backward
-        const cat = charCategory(self.document.buffer.charAt(pos))
-        while (pos > 0) {
-            const prev_cat = charCategory(self.document.buffer.charAt(pos - 1))
-            if (prev_cat != cat) { break }
-            pos -= 1
-        }
-        self.cursor.offset = pos
-        self.recomputeLineCol()
     }
 
-    /// Move cursor to end of current word (e in vim).
-    /// Skip whitespace forward, then skip word forward, land on last char.
-    fn moveWordEnd() void {
-        const buf_len = self.document.buffer.len()
-        if (self.cursor.offset >= buf_len - 1) { return }
-        var pos = self.cursor.offset + 1
-        // Skip whitespace
-        while (pos < buf_len) {
-            const cat = charCategory(self.document.buffer.charAt(pos))
-            if (cat != 0) { break }
-            pos += 1
+    /// Resize the editor render grid and re-render.
+    fn resizeEditorGrid(rows: i64, cols: i64) void {
+        self.viewport_rows = rows
+        self.viewport_cols = cols
+        self.render_grid = TerminalGrid.init(rows, cols)
+        self.ensureCursorInView()
+        self.renderEditorGrid()
+    }
+
+    /// Scroll to keep cursor visible, with scrolloff margin.
+    fn ensureCursorInView() void {
+        const scrolloff: i64 = 5
+        const content_rows = self.viewport_rows
+        if (content_rows <= 0) { return }
+        if (self.cursor.line < self.scroll_offset + scrolloff) {
+            self.scroll_offset = self.cursor.line - scrolloff
+            if (self.scroll_offset < 0) { self.scroll_offset = 0 }
         }
-        // Skip characters of the same category
-        if (pos < buf_len) {
-            const cat = charCategory(self.document.buffer.charAt(pos))
-            while (pos < buf_len - 1) {
-                const next_cat = charCategory(self.document.buffer.charAt(pos + 1))
-                if (next_cat != cat) { break }
-                pos += 1
+        if (self.cursor.line >= self.scroll_offset + content_rows - scrolloff) {
+            self.scroll_offset = self.cursor.line - content_rows + scrolloff + 1
+        }
+        // Sync scroll anchor with new scroll_offset
+        self.scroll_anchor = self.document.buffer.lineStartOffset(self.scroll_offset)
+        self.ensureCursorHInView()
+    }
+
+    /// Horizontal scroll to keep cursor visible, with scrolloff margin.
+    fn ensureCursorHInView() void {
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        const content_cols = self.viewport_cols - gutter_w
+        if (content_cols <= 0) { return }
+        const scrolloff: i64 = 5
+        if (self.cursor.col < self.h_scroll_offset + scrolloff) {
+            self.h_scroll_offset = self.cursor.col - scrolloff
+            if (self.h_scroll_offset < 0) { self.h_scroll_offset = 0 }
+        }
+        if (self.cursor.col >= self.h_scroll_offset + content_cols - scrolloff) {
+            self.h_scroll_offset = self.cursor.col - content_cols + scrolloff + 1
+        }
+    }
+
+    /// Compute gutter width (digits + 1 space padding + 1 separator).
+    fn gutterWidth(total_lines: i64) i64 {
+        var digits: i64 = 1
+        var n = total_lines
+        while (n >= 10) {
+            n = n / 10
+            digits += 1
+        }
+        const width = digits + 2
+        if (width < 4) { return 4 }
+        return width
+    }
+
+    /// Render the entire editor grid: gutter, content, cursor.
+    fn renderEditorGrid() void {
+        if (self.viewport_rows <= 0 or self.viewport_cols <= 0) { return }
+
+        // Validate buffer before rendering — catches delayed corruption
+        if (g_buffer_debug) {
+            if (!self.document.buffer.validate()) {
+                self.document.buffer.dumpState("CORRUPT before renderEditorGrid")
+                @trap()
             }
         }
-        self.cursor.offset = pos
-        self.recomputeLineCol()
+
+        // Clear grid
+        self.render_grid = TerminalGrid.init(self.viewport_rows, self.viewport_cols)
+
+        // Layout
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        const content_cols = self.viewport_cols - gutter_w
+        const content_rows = self.viewport_rows
+
+        // Render each visible line
+        for row in 0..content_rows {
+            const doc_line = self.scroll_offset + row
+            if (doc_line >= total_lines) { break }
+
+            // Line number (right-aligned in gutter)
+            self.renderLineNumber(row, doc_line, gutter_w)
+
+            // Buffer text content
+            self.renderLineContent(row, doc_line, gutter_w, content_cols)
+        }
+
+        // Selection highlight
+        self.renderSelection()
+
+        // Cursor positions (all selection range heads)
+        self.renderCursors(gutter_w)
+
+        // Bracket match highlight
+        self.renderBracketMatch(gutter_w)
+    }
+
+    /// Render a right-aligned line number in the gutter.
+    fn renderLineNumber(screen_row: i64, doc_line: i64, gutter_w: i64) void {
+        // Convert line number to string (1-based)
+        const line_num = doc_line + 1
+        var num_sb: StringBuilder = .{}
+        num_sb.appendInt(line_num)
+        const num_str = num_sb.toString()
+
+        // Right-align: place digits so last digit is at gutter_w - 2
+        const start_col = gutter_w - 1 - num_str.len
+        if (start_col < 0) { return }
+
+        // Color: bright for cursor line, dim for others
+        var r: i64 = 100
+        var g: i64 = 100
+        var b: i64 = 110
+        if (doc_line == self.cursor.line) {
+            r = THEME_FG_R
+            g = THEME_FG_G
+            b = THEME_FG_B
+        }
+        self.gridWriteStr(screen_row, start_col, num_str, r, g, b)
+    }
+
+    /// Render buffer text content for a line, offset by h_scroll_offset.
+    fn renderLineContent(screen_row: i64, doc_line: i64, gutter_w: i64, content_cols: i64) void {
+        const line_len = self.document.buffer.lineLength(doc_line)
+        const line_start = self.document.buffer.lineStartOffset(doc_line)
+        const first_char = self.h_scroll_offset
+        if (first_char >= line_len) { return }
+        const visible_len = line_len - first_char
+        const max_chars = if (content_cols < visible_len) { content_cols } else { visible_len }
+        for col in 0..max_chars {
+            const ch = self.document.buffer.charAt(line_start + first_char + col)
+            if (ch >= 32) {
+                const c = self.render_grid.getCell(screen_row, gutter_w + col)
+                c.codepoint = ch
+                c.fg_type = COLOR_RGB
+                c.fg_val = packRgb(THEME_FG_R, THEME_FG_G, THEME_FG_B)
+            }
+        }
+    }
+
+    /// Convert a byte offset to a line number by scanning lineStartOffset().
+    fn offsetToLine(offset: i64) i64 {
+        const total = self.document.buffer.lineCount()
+        var line: i64 = 0
+        while (line < total - 1) {
+            const next_start = self.document.buffer.lineStartOffset(line + 1)
+            if (offset < next_start) { return line }
+            line += 1
+        }
+        return line
+    }
+
+    /// Convert a byte offset to a column within its line.
+    fn offsetToCol(offset: i64) i64 {
+        const line = self.offsetToLine(offset)
+        return offset - self.document.buffer.lineStartOffset(line)
+    }
+
+    /// Set CELL_SELECTED flag on cells that fall within selection ranges.
+    /// Called after content rendering in renderEditorGrid().
+    fn renderSelection() void {
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        var i: i64 = 0
+        while (i < self.document.selection.ranges.count) {
+            const r = self.document.selection.ranges.get(i)
+            if (r.isEmpty()) { i += 1; continue }
+            const sel_from = r.from()
+            const sel_to = r.to()
+            // Convert to line/col
+            const from_line = self.offsetToLine(sel_from)
+            const from_col = sel_from - self.document.buffer.lineStartOffset(from_line)
+            const to_line = self.offsetToLine(sel_to)
+            const to_col = sel_to - self.document.buffer.lineStartOffset(to_line)
+            // Iterate visible lines in range
+            var line = from_line
+            while (line <= to_line) {
+                const screen_row = line - self.scroll_offset
+                if (screen_row < 0) { line += 1; continue }
+                if (screen_row >= self.viewport_rows) { break }
+                const line_len = self.document.buffer.lineLength(line)
+                var start_col: i64 = 0
+                if (line == from_line) { start_col = from_col }
+                var end_col = line_len
+                if (line == to_line) { end_col = to_col }
+                // Map to screen cols
+                var col = start_col
+                while (col < end_col) {
+                    const screen_col = gutter_w + col - self.h_scroll_offset
+                    if (screen_col >= 0 and screen_col < self.viewport_cols) {
+                        const c = self.render_grid.getCell(screen_row, screen_col)
+                        c.flags = c.flags | CELL_SELECTED
+                    }
+                    col += 1
+                }
+                line += 1
+            }
+            i += 1
+        }
+    }
+
+    /// Mark all cursor positions (selection range heads) with CELL_CURSOR flag.
+    /// Only marks when cursor_visible is true (controlled by blink timer).
+    fn renderCursors(gutter_w: i64) void {
+        if (!self.cursor_visible) { return }
+        var i: i64 = 0
+        while (i < self.document.selection.ranges.count) {
+            const r = self.document.selection.ranges.get(i)
+            const head = r.head
+            const cursor_line = self.offsetToLine(head)
+            const cursor_col = head - self.document.buffer.lineStartOffset(cursor_line)
+            const screen_row = cursor_line - self.scroll_offset
+            if (screen_row >= 0 and screen_row < self.viewport_rows) {
+                const screen_col = gutter_w + cursor_col - self.h_scroll_offset
+                if (screen_col >= 0 and screen_col < self.viewport_cols) {
+                    const c = self.render_grid.getCell(screen_row, screen_col)
+                    c.flags = c.flags | CELL_CURSOR
+                }
+            }
+            i += 1
+        }
+    }
+
+    /// Highlight matching bracket at cursor position.
+    /// Scans forward for opening brackets, backward for closing brackets.
+    fn renderBracketMatch(gutter_w: i64) void {
+        const buf_len = self.document.buffer.len()
+        if (buf_len == 0) { return }
+        // Check char at cursor and char before cursor for brackets
+        var bracket_pos = -1
+        var bracket_ch = 0
+        if (self.cursor.offset < buf_len) {
+            const ch = self.document.buffer.charAt(self.cursor.offset)
+            if (closingBracketFor(ch) > 0 or openingBracketFor(ch) > 0) {
+                bracket_pos = self.cursor.offset
+                bracket_ch = ch
+            }
+        }
+        if (bracket_pos < 0 and self.cursor.offset > 0) {
+            const ch = self.document.buffer.charAt(self.cursor.offset - 1)
+            if (closingBracketFor(ch) > 0 or openingBracketFor(ch) > 0) {
+                bracket_pos = self.cursor.offset - 1
+                bracket_ch = ch
+            }
+        }
+        if (bracket_pos < 0) { return }
+        // Find matching bracket
+        var match_pos = -1
+        const close = closingBracketFor(bracket_ch)
+        if (close > 0) {
+            // Opening bracket — scan forward
+            var depth = 1
+            var pos = bracket_pos + 1
+            while (pos < buf_len and depth > 0) {
+                const ch = self.document.buffer.charAt(pos)
+                if (ch == bracket_ch) { depth += 1 }
+                if (ch == close) { depth -= 1 }
+                if (depth == 0) { match_pos = pos }
+                pos += 1
+            }
+        } else {
+            // Closing bracket — scan backward
+            const open = openingBracketFor(bracket_ch)
+            if (open > 0) {
+                var depth = 1
+                var pos = bracket_pos - 1
+                while (pos >= 0 and depth > 0) {
+                    const ch = self.document.buffer.charAt(pos)
+                    if (ch == bracket_ch) { depth += 1 }
+                    if (ch == open) { depth -= 1 }
+                    if (depth == 0) { match_pos = pos }
+                    pos -= 1
+                }
+            }
+        }
+        if (match_pos < 0) { return }
+        // Mark both brackets in render grid
+        self.markBracketCell(bracket_pos, gutter_w)
+        self.markBracketCell(match_pos, gutter_w)
+    }
+
+    /// Mark a single buffer offset as bracket match in the render grid.
+    fn markBracketCell(buf_offset: int, gutter_w: i64) void {
+        // Convert offset to line/col
+        const line = self.offsetToLine(buf_offset)
+        const col = buf_offset - self.document.buffer.lineStartOffset(line)
+        // Convert to screen coordinates
+        const screen_row = line - self.scroll_offset
+        const screen_col = gutter_w + col - self.h_scroll_offset
+        if (screen_row >= 0 and screen_row < self.viewport_rows) {
+            if (screen_col >= 0 and screen_col < self.viewport_cols) {
+                const c = self.render_grid.getCell(screen_row, screen_col)
+                c.flags = c.flags | CELL_BRACKET_MATCH
+            }
+        }
+    }
+
+    /// Handle mouse click — position cursor at screen coordinates.
+    /// Converts screen (row, col) to document (line, col) accounting for gutter and scroll.
+    fn editorClick(screen_row: i64, screen_col: i64) void {
+        self.document.history.breakGroup()
+        self.last_edit_kind = 0
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        // Ignore clicks in gutter
+        if (screen_col < gutter_w) { return }
+        const doc_col = screen_col - gutter_w + self.h_scroll_offset
+        const doc_line = screen_row + self.scroll_offset
+        if (doc_line < 0) { return }
+        // Clamp to valid line
+        var target_line = doc_line
+        if (target_line >= total_lines) { target_line = total_lines - 1 }
+        if (target_line < 0) { target_line = 0 }
+        // Clamp col to line length
+        const line_len = self.document.buffer.lineLength(target_line)
+        var target_col = doc_col
+        if (target_col > line_len) { target_col = line_len }
+        if (target_col < 0) { target_col = 0 }
+        // Update cursor
+        self.cursor.line = target_line
+        self.cursor.col = target_col
+        self.recomputeOffset()
+        // Validate computed offset is within bounds
+        if (g_buffer_debug) {
+            if (self.cursor.offset < 0 or self.cursor.offset > self.document.buffer.len()) {
+                self.document.buffer.dumpState("editorClick: offset out of bounds")
+                @trap()
+            }
+        }
+        // Collapse selection to cursor point
+        self.document.selection = Selection.point(self.cursor.offset)
+        self.renderEditorGrid()
+    }
+
+    /// Handle mouse drag — extend selection from click anchor to current position.
+    fn editorDrag(screen_row: i64, screen_col: i64) void {
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        const doc_col = screen_col - gutter_w + self.h_scroll_offset
+        const doc_line = screen_row + self.scroll_offset
+        // Clamp
+        var target_line = doc_line
+        if (target_line >= total_lines) { target_line = total_lines - 1 }
+        if (target_line < 0) { target_line = 0 }
+        const line_len = self.document.buffer.lineLength(target_line)
+        var target_col = doc_col
+        if (target_col > line_len) { target_col = line_len }
+        if (target_col < 0) { target_col = 0 }
+        // Compute byte offset for head
+        const head_offset = self.document.buffer.lineStartOffset(target_line) + target_col
+        // Update cursor to head position
+        self.cursor.line = target_line
+        self.cursor.col = target_col
+        self.cursor.offset = head_offset
+        // Extend primary selection — anchor stays, head moves
+        const primary = self.document.selection.primary()
+        self.document.selection.replace(self.document.selection.primary_index,
+            Range { anchor: primary.anchor, head: head_offset })
+        self.renderEditorGrid()
+    }
+
+    /// Cursor screen row (for Swift rendering — cursor line minus scroll offset).
+    fn editorCursorScreenRow() i64 {
+        return self.cursor.line - self.scroll_offset
+    }
+
+    /// Cursor screen col (for Swift rendering — gutter + cursor col minus h_scroll offset).
+    fn editorCursorScreenCol() i64 {
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        return gutter_w + self.cursor.col - self.h_scroll_offset
+    }
+
+    /// Set scroll offset from external source (scrollbar), clamped to valid range.
+    fn setScrollOffset(offset: i64) void {
+        const total = self.document.buffer.lineCount()
+        const max_offset = total - self.viewport_rows
+        if (offset < 0) { self.scroll_offset = 0 }
+        else if (max_offset > 0 and offset > max_offset) { self.scroll_offset = max_offset }
+        else { self.scroll_offset = offset }
+        // Sync scroll anchor
+        self.scroll_anchor = self.document.buffer.lineStartOffset(self.scroll_offset)
+        self.renderEditorGrid()
+    }
+
+    /// Handle scroll wheel input — same accumulator pattern as terminal.scrollEvent().
+    /// delta: raw scroll delta in millipoints (points * 1000).
+    /// precise: 1 for trackpad, 0 for discrete mouse wheel.
+    /// cell_height: cell height in millipoints.
+    /// multiplier: discrete scroll multiplier from config (default 3).
+    fn scrollEvent(delta: i64, precise: i64, cell_height: i64, multiplier: i64) void {
+        if (cell_height <= 0) { return }
+
+        // Normalize delta to millipoints (Ghostty pattern from terminal.scrollEvent)
+        var adjusted = delta
+        if (precise == 0) {
+            adjusted = delta * cell_height * multiplier / 1000
+        }
+
+        // Accumulate fractional scroll
+        self.scroll_accumulator = self.scroll_accumulator + adjusted
+
+        // Not enough for a full cell yet
+        if (self.scroll_accumulator < 0) {
+            if (self.scroll_accumulator > 0 - cell_height) { return }
+        } else {
+            if (self.scroll_accumulator < cell_height) { return }
+        }
+
+        // Calculate row delta
+        const rows = self.scroll_accumulator / cell_height
+        self.scroll_accumulator = self.scroll_accumulator - rows * cell_height
+
+        // Apply as offset change
+        self.setScrollOffset(self.scroll_offset + rows)
+    }
+
+    /// Set horizontal scroll offset (from scrollbar), clamped to valid range.
+    fn setHScrollOffset(offset: i64) void {
+        if (offset < 0) { self.h_scroll_offset = 0 }
+        else { self.h_scroll_offset = offset }
+        self.renderEditorGrid()
+    }
+
+    /// Handle horizontal scroll wheel input — same accumulator pattern as vertical.
+    fn hScrollEvent(delta: i64, precise: i64, cell_width: i64, multiplier: i64) void {
+        if (cell_width <= 0) { return }
+
+        var adjusted = delta
+        if (precise == 0) {
+            adjusted = delta * cell_width * multiplier / 1000
+        }
+
+        self.h_scroll_accumulator = self.h_scroll_accumulator + adjusted
+
+        if (self.h_scroll_accumulator < 0) {
+            if (self.h_scroll_accumulator > 0 - cell_width) { return }
+        } else {
+            if (self.h_scroll_accumulator < cell_width) { return }
+        }
+
+        const cols = self.h_scroll_accumulator / cell_width
+        self.h_scroll_accumulator = self.h_scroll_accumulator - cols * cell_width
+
+        self.setHScrollOffset(self.h_scroll_offset + cols)
     }
 
     /// Recompute line/col from byte offset by scanning from start.
@@ -688,6 +1836,7 @@ test "surface move right across newline" {
     s.cursor.offset = 0
     s.cursor.line = 0
     s.cursor.col = 0
+    s.document.selection = Selection.point(0)
     // move right: 'a' -> col 1
     s.handleInput(InputAction.move_right, 0)
     @assertEq(s.cursor.col, 1)
@@ -724,11 +1873,11 @@ test "surface move up down clamps col" {
     @assertEq(s.cursor.line, 1)
     @assertEq(s.cursor.col, 2)
     @assertEq(s.cursor.offset, 8)
-    // move up — line 0 "hello" has len 5, col stays 2
+    // move up — line 0 "hello" has len 5, goal_col restores to 5
     s.handleInput(InputAction.move_up, 0)
     @assertEq(s.cursor.line, 0)
-    @assertEq(s.cursor.col, 2)
-    @assertEq(s.cursor.offset, 2)
+    @assertEq(s.cursor.col, 5)
+    @assertEq(s.cursor.offset, 5)
 }
 
 test "surface move line end" {
@@ -784,6 +1933,9 @@ test "editor surface has inactive terminal" {
 test "surface undo insert" {
     var s = Surface.init()
     s.handleInput(InputAction.insert_char, 'a')
+    // Break undo group with a move
+    s.handleInput(InputAction.move_left, 0)
+    s.handleInput(InputAction.move_right, 0)
     s.handleInput(InputAction.insert_char, 'b')
     @assertEq(s.render(), "ab")
     // Undo second insert
@@ -799,6 +1951,8 @@ test "surface undo insert" {
 test "surface redo after undo" {
     var s = Surface.init()
     s.handleInput(InputAction.insert_char, 'x')
+    s.handleInput(InputAction.move_left, 0)
+    s.handleInput(InputAction.move_right, 0)
     s.handleInput(InputAction.insert_char, 'y')
     @assertEq(s.render(), "xy")
     s.handleInput(InputAction.undo, 0)
@@ -842,9 +1996,13 @@ test "surface undo redo preserves cursor" {
     s.handleInput(InputAction.insert_char, 'e')
     s.handleInput(InputAction.insert_char, 'l')
     s.handleInput(InputAction.insert_char, 'l')
+    // Break group with movement, then insert last char
+    s.handleInput(InputAction.move_left, 0)
+    s.handleInput(InputAction.move_right, 0)
     s.handleInput(InputAction.insert_char, 'o')
     @assertEq(s.cursor.offset, 5)
     @assertEq(s.cursor.col, 5)
+    // Undo just the 'o'
     s.handleInput(InputAction.undo, 0)
     @assertEq(s.cursor.offset, 4)
     @assertEq(s.cursor.col, 4)
@@ -870,58 +2028,7 @@ test "surface undo delete forward" {
     @assertEq(s.cursor.offset, 0)
 }
 
-test "surface mode switching" {
-    var s = Surface.init()
-    @assertEq(s.mode, Mode.Insert)
-    // Escape → Normal
-    s.handleInput(InputAction.enter_normal, 0)
-    @assertEq(s.mode, Mode.Normal)
-    // i → Insert
-    s.handleInput(InputAction.enter_insert, 0)
-    @assertEq(s.mode, Mode.Insert)
-    // Escape → Normal
-    s.handleInput(InputAction.enter_normal, 0)
-    @assertEq(s.mode, Mode.Normal)
-    // v → Select
-    s.handleInput(InputAction.enter_select, 0)
-    @assertEq(s.mode, Mode.Select)
-}
-
-test "surface normal mode movement" {
-    var s = Surface.init()
-    // Type "hello" in insert mode
-    s.handleInput(InputAction.insert_char, 'h')
-    s.handleInput(InputAction.insert_char, 'e')
-    s.handleInput(InputAction.insert_char, 'l')
-    s.handleInput(InputAction.insert_char, 'l')
-    s.handleInput(InputAction.insert_char, 'o')
-    @assertEq(s.cursor.offset, 5)
-    // Switch to normal mode
-    s.handleInput(InputAction.enter_normal, 0)
-    @assertEq(s.mode, Mode.Normal)
-    // In normal mode, typing should do nothing
-    s.handleInput(InputAction.none, 'x')
-    @assertEq(s.render(), "hello")
-    // Movement should work
-    s.handleInput(InputAction.move_left, 0)
-    @assertEq(s.cursor.offset, 4)
-    s.handleInput(InputAction.move_left, 0)
-    @assertEq(s.cursor.offset, 3)
-}
-
-test "surface enter insert after" {
-    var s = Surface.init()
-    s.handleInput(InputAction.insert_char, 'a')
-    s.handleInput(InputAction.insert_char, 'b')
-    s.handleInput(InputAction.insert_char, 'c')
-    // cursor at 3, move to position 1
-    s.cursor.offset = 1
-    s.cursor.col = 1
-    // enter_insert_after moves right then enters insert
-    s.handleInput(InputAction.enter_insert_after, 0)
-    @assertEq(s.cursor.offset, 2)
-    @assertEq(s.mode, Mode.Insert)
-}
+// Vim mode tests removed — standard editor only (vim motions are a future extension)
 
 test "surface word forward" {
     var s = Surface.init()
@@ -941,7 +2048,7 @@ test "surface word forward" {
     s.cursor.offset = 0
     s.cursor.line = 0
     s.cursor.col = 0
-    s.handleInput(InputAction.enter_normal, 0)
+    s.document.selection = Selection.point(0)
     // w → skip "hello", skip space, land on "world"
     s.handleInput(InputAction.move_word_forward, 0)
     @assertEq(s.cursor.offset, 6)
@@ -963,7 +2070,6 @@ test "surface word backward" {
     s.handleInput(InputAction.insert_char, 'l')
     s.handleInput(InputAction.insert_char, 'd')
     // cursor at end (11)
-    s.handleInput(InputAction.enter_normal, 0)
     // b → skip "world" back, skip space, land on start of "hello"?
     // Actually from offset 11 (past end), b goes to: pos-1=10 'd', cat=1 word,
     // skip word backward: 'd','l','r','o','w' → pos=6. Then prev_cat at pos-1=5=' ' cat=0 ≠ 1, stop.
@@ -993,10 +2099,10 @@ test "surface word end" {
     s.cursor.offset = 0
     s.cursor.line = 0
     s.cursor.col = 0
-    s.handleInput(InputAction.enter_normal, 0)
-    // e → skip to end of "hello": pos=0+1=1, cat=1 word, skip while next same: 1→2→3→4 stop (pos+1=5 ' ' cat=0)
+    s.document.selection = Selection.point(0)
+    // move_word_end mapped to move_word_forward: skips "hello" + space → "world" at offset 6
     s.handleInput(InputAction.move_word_end, 0)
-    @assertEq(s.cursor.offset, 4)
+    @assertEq(s.cursor.offset, 6)
 }
 
 test "char category" {
@@ -1010,4 +2116,136 @@ test "char category" {
     @assertEq(charCategory('.'), 2)
     @assertEq(charCategory('('), 2)
     @assertEq(charCategory('+'), 2)
+}
+
+test "multi-cursor add and collapse" {
+    var s = Surface.init()
+    // "hello world"
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, ' ')
+    s.handleInput(InputAction.insert_char, 'w')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, 'r')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'd')
+    // Add a second cursor at offset 0
+    s.addCursorAt(0)
+    @assertEq(s.document.selection.ranges.count, 2)
+    // Collapse to single cursor
+    s.collapseToPrimaryCursor()
+    @assertEq(s.document.selection.ranges.count, 1)
+}
+
+test "multi-cursor move right" {
+    var s = Surface.init()
+    // "abc"
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    s.handleInput(InputAction.insert_char, 'c')
+    // Place cursors at 0 and 2
+    s.document.selection = Selection.point(0)
+    s.addCursorAt(2)
+    @assertEq(s.document.selection.ranges.count, 2)
+    // Move right
+    s.moveAllCursors(InputAction.move_right)
+    // Cursor 0→1, cursor 2→3
+    const r0 = s.document.selection.ranges.get(0)
+    const r1 = s.document.selection.ranges.get(1)
+    @assertEq(r0.head, 1)
+    @assertEq(r1.head, 3)
+}
+
+test "multi-cursor insert" {
+    var s = Surface.init()
+    // "abc"
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    s.handleInput(InputAction.insert_char, 'c')
+    // Place cursors at 1 and 3 (after 'a' and after 'c')
+    s.document.selection = Selection.point(1)
+    s.addCursorAt(3)
+    s.syncCursorFromPrimary()
+    // Insert 'X' at both
+    s.insertAtAllCursors('X')
+    // Result: "aXbcX" — inserted at positions 1 and 3, became 1 and 4 (shifted)
+    @assertEq(s.document.buffer.len(), 5)
+    @assertEq(s.document.buffer.charAt(0), 'a')
+    @assertEq(s.document.buffer.charAt(1), 'X')
+    @assertEq(s.document.buffer.charAt(2), 'b')
+    @assertEq(s.document.buffer.charAt(3), 'c')
+    @assertEq(s.document.buffer.charAt(4), 'X')
+}
+
+test "multi-cursor delete back" {
+    var s = Surface.init()
+    // "abcd"
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    s.handleInput(InputAction.insert_char, 'c')
+    s.handleInput(InputAction.insert_char, 'd')
+    // Place cursors at 2 and 4 (after 'b' and after 'd')
+    s.document.selection = Selection.point(2)
+    s.addCursorAt(4)
+    s.syncCursorFromPrimary()
+    // Delete back at both
+    s.deleteBackAtAllCursors()
+    // Should delete 'b' (at offset 1) and 'd' (at offset 3→2 after shift)
+    // Result: "ac"
+    @assertEq(s.document.buffer.len(), 2)
+    @assertEq(s.document.buffer.charAt(0), 'a')
+    @assertEq(s.document.buffer.charAt(1), 'c')
+}
+
+test "add next occurrence" {
+    var s = Surface.init()
+    // "hello world hello"
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, ' ')
+    s.handleInput(InputAction.insert_char, 'w')
+    s.handleInput(InputAction.insert_char, 'o')
+    s.handleInput(InputAction.insert_char, 'r')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'd')
+    s.handleInput(InputAction.insert_char, ' ')
+    s.handleInput(InputAction.insert_char, 'h')
+    s.handleInput(InputAction.insert_char, 'e')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'l')
+    s.handleInput(InputAction.insert_char, 'o')
+    // Select first "hello" (0..5)
+    s.document.selection = Selection.init(0, 5)
+    s.syncCursorFromPrimary()
+    // Add next occurrence
+    s.addNextOccurrence()
+    // Should now have 2 selections: first "hello" (0..5) and second "hello" (12..17)
+    @assertEq(s.document.selection.ranges.count, 2)
+    const r0 = s.document.selection.ranges.get(0)
+    const r1 = s.document.selection.ranges.get(1)
+    @assertEq(r0.from(), 0)
+    @assertEq(r0.to(), 5)
+    @assertEq(r1.from(), 12)
+    @assertEq(r1.to(), 17)
+}
+
+test "escape collapses selection" {
+    var s = Surface.init()
+    // "abc"
+    s.handleInput(InputAction.insert_char, 'a')
+    s.handleInput(InputAction.insert_char, 'b')
+    s.handleInput(InputAction.insert_char, 'c')
+    // Select all
+    s.document.selection = Selection.init(0, 3)
+    s.syncCursorFromPrimary()
+    // Escape collapses selection
+    s.handleInput(InputAction.collapse_cursors, 0)
+    const primary = s.document.selection.primary()
+    @assertEq(primary.isEmpty(), true)
 }

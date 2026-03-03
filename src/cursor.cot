@@ -6,10 +6,28 @@ struct Cursor {
     line: int,
     col: int,
     offset: int,
+    goal_col: int,  // Preserved target column for vertical movement (Zed: SelectionGoal)
 
     /// Create a cursor at the start of the buffer.
     static fn init() Cursor {
-        return Cursor { line: 0, col: 0, offset: 0 }
+        return Cursor { line: 0, col: 0, offset: 0, goal_col: -1 }
+    }
+
+    /// Clear the goal column (called on horizontal movement, typing, click).
+    fn clearGoal() void {
+        self.goal_col = -1
+    }
+
+    /// Get the effective goal column for vertical movement.
+    /// Returns goal_col if set, otherwise current col.
+    fn effectiveGoal() int {
+        if (self.goal_col >= 0) { return self.goal_col }
+        return self.col
+    }
+
+    /// Set the goal column if not already set.
+    fn ensureGoal() void {
+        if (self.goal_col < 0) { self.goal_col = self.col }
     }
 
     /// Move cursor one position to the right.
@@ -144,4 +162,26 @@ test "cursor move to" {
     @assertEq(c.line, 5)
     @assertEq(c.col, 10)
     @assertEq(c.offset, 42)
+}
+
+test "cursor goal col init" {
+    var c = Cursor.init()
+    @assertEq(c.goal_col, -1)
+    @assertEq(c.effectiveGoal(), 0) // falls back to col
+}
+
+test "cursor goal col ensure and clear" {
+    var c = Cursor.init()
+    c.col = 15
+    c.ensureGoal()
+    @assertEq(c.goal_col, 15)
+    @assertEq(c.effectiveGoal(), 15)
+    // ensureGoal doesn't overwrite if already set
+    c.col = 5
+    c.ensureGoal()
+    @assertEq(c.goal_col, 15) // still 15
+    // clearGoal resets
+    c.clearGoal()
+    @assertEq(c.goal_col, -1)
+    @assertEq(c.effectiveGoal(), 5) // falls back to current col
 }

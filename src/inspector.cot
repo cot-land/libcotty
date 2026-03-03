@@ -17,6 +17,7 @@ const PANEL_SCREEN: i64 = 0
 const PANEL_MODES: i64 = 1
 const PANEL_KEYBOARD: i64 = 2
 const PANEL_TERMIO: i64 = 3
+const PANEL_EDITOR: i64 = 4
 
 const MAX_KEY_EVENTS: i64 = 100
 const MAX_VT_EVENTS: i64 = 200
@@ -56,6 +57,28 @@ struct VtRecord {
 // Inspector — per-surface diagnostic panel
 // ============================================================================
 
+/// Snapshot of editor state for the debug panel.
+/// Passed in from surface to avoid circular imports.
+struct EditorDebugState {
+    buf_len: i64,
+    gap_start: i64,
+    gap_end: i64,
+    data_count: i64,
+    gap_size: i64,
+    line_count: i64,
+    cursor_line: i64,
+    cursor_col: i64,
+    cursor_offset: i64,
+    cursor_goal_col: i64,
+    selection_count: i64,
+    primary_index: i64,
+    revision_count: i64,
+    history_current: i64,
+    at_root: bool,
+    can_redo: bool,
+    valid: bool,
+}
+
 struct Inspector {
     active: bool,
     panel: i64,
@@ -75,6 +98,9 @@ struct Inspector {
     screen_scroll: i64,
     modes_scroll: i64,
 
+    // Editor debug panel scroll
+    editor_scroll: i64,
+
     static fn init(rows: i64, cols: i64) Inspector {
         var key_events: List(KeyRecord) = .{}
         var vt_events: List(VtRecord) = .{}
@@ -91,6 +117,7 @@ struct Inspector {
             vt_scroll: 0,
             screen_scroll: 0,
             modes_scroll: 0,
+            editor_scroll: 0,
         }
     }
 
@@ -102,12 +129,13 @@ struct Inspector {
     }
 
     fn setPanel(p: i64) void {
-        if (p < 0 or p > 3) { return }
+        if (p < 0 or p > 4) { return }
         self.panel = p
         self.key_scroll = 0
         self.vt_scroll = 0
         self.screen_scroll = 0
         self.modes_scroll = 0
+        self.editor_scroll = 0
         if (self.active) {
             self.rebuild()
         }
@@ -159,6 +187,15 @@ struct Inspector {
             } else if (self.modes_scroll > max_scroll) {
                 self.modes_scroll = max_scroll
             }
+        } else if (self.panel == PANEL_EDITOR) {
+            self.editor_scroll = self.editor_scroll + delta
+            if (self.editor_scroll < 0) { self.editor_scroll = 0 }
+            const max_scroll: i64 = 20 - (self.rows - 2)
+            if (max_scroll < 0) {
+                self.editor_scroll = 0
+            } else if (self.editor_scroll > max_scroll) {
+                self.editor_scroll = max_scroll
+            }
         }
         if (self.active) {
             self.rebuild()
@@ -172,6 +209,7 @@ struct Inspector {
         if (self.panel == PANEL_TERMIO) { return self.vt_events.count }
         if (self.panel == PANEL_SCREEN) { return 25 }
         if (self.panel == PANEL_MODES) { return 20 }
+        if (self.panel == PANEL_EDITOR) { return 20 }
         return 0
     }
 
@@ -181,6 +219,7 @@ struct Inspector {
         if (self.panel == PANEL_TERMIO) { return self.vt_scroll }
         if (self.panel == PANEL_SCREEN) { return self.screen_scroll }
         if (self.panel == PANEL_MODES) { return self.modes_scroll }
+        if (self.panel == PANEL_EDITOR) { return self.editor_scroll }
         return 0
     }
 
@@ -221,6 +260,15 @@ struct Inspector {
                 self.modes_scroll = 0
             } else if (self.modes_scroll > max_scroll) {
                 self.modes_scroll = max_scroll
+            }
+        } else if (self.panel == PANEL_EDITOR) {
+            self.editor_scroll = offset
+            if (self.editor_scroll < 0) { self.editor_scroll = 0 }
+            const max_scroll: i64 = 20 - (self.rows - 2)
+            if (max_scroll < 0) {
+                self.editor_scroll = 0
+            } else if (self.editor_scroll > max_scroll) {
+                self.editor_scroll = max_scroll
             }
         }
         if (self.active) {
@@ -300,6 +348,7 @@ struct Inspector {
             PANEL_MODES => self.rebuildModes(),
             PANEL_KEYBOARD => self.rebuildKeyboard(),
             PANEL_TERMIO => self.rebuildTermio(),
+            PANEL_EDITOR => self.rebuildEditor(),
             else => {},
         }
     }
@@ -673,6 +722,155 @@ struct Inspector {
         self.writeStr(0, 40, "Description", 130, 130, 140)
         self.clearRow(1)
         self.renderSeparator(1)
+    }
+
+    // ========================================================================
+    // Editor Debug Panel — Buffer, cursor, selection, history state
+    // ========================================================================
+
+    fn rebuildEditor() void {
+        // Placeholder: use rebuildEditorState() with state snapshot
+        self.writeStr(1, 2, "Waiting for editor state...", 100, 100, 110)
+    }
+
+    fn rebuildEditorState(state: EditorDebugState) void {
+        // Re-render: clear and redraw
+        self.grid = TerminalGrid.init(self.rows, self.cols)
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                const c = self.grid.getCell(row, col)
+                c.bg_type = COLOR_RGB
+                c.bg_val = packRgb(30, 30, 35)
+            }
+        }
+
+        const label_col: i64 = 4
+        const value_col: i64 = 22
+        const scroll = self.editor_scroll
+        var row: i64 = 0 - scroll
+
+        // -- Status section --
+        if (state.valid) {
+            self.writeStr(row, 2, "VALID", 80, 220, 80)
+        } else {
+            self.writeStr(row, 2, "CORRUPT", 255, 60, 60)
+        }
+        row += 2
+
+        // -- Buffer section --
+        self.writeStr(row, 2, "Buffer", 200, 170, 100)
+        row += 1
+
+        var sb1: StringBuilder = .{}
+        sb1.appendInt(state.buf_len)
+        self.writeStr(row, label_col, "len", 130, 130, 140)
+        self.writeStr(row, value_col, sb1.toString(), 220, 220, 220)
+        row += 1
+
+        var sb2: StringBuilder = .{}
+        sb2.appendInt(state.gap_start)
+        self.writeStr(row, label_col, "gap_start", 130, 130, 140)
+        self.writeStr(row, value_col, sb2.toString(), 220, 220, 220)
+        row += 1
+
+        var sb3: StringBuilder = .{}
+        sb3.appendInt(state.gap_end)
+        self.writeStr(row, label_col, "gap_end", 130, 130, 140)
+        self.writeStr(row, value_col, sb3.toString(), 220, 220, 220)
+        row += 1
+
+        var sb4: StringBuilder = .{}
+        sb4.appendInt(state.data_count)
+        self.writeStr(row, label_col, "data.count", 130, 130, 140)
+        self.writeStr(row, value_col, sb4.toString(), 220, 220, 220)
+        row += 1
+
+        var sb5: StringBuilder = .{}
+        sb5.appendInt(state.gap_size)
+        self.writeStr(row, label_col, "gapSize", 130, 130, 140)
+        self.writeStr(row, value_col, sb5.toString(), 220, 220, 220)
+        row += 1
+
+        var sb6: StringBuilder = .{}
+        sb6.appendInt(state.line_count)
+        self.writeStr(row, label_col, "lineCount", 130, 130, 140)
+        self.writeStr(row, value_col, sb6.toString(), 220, 220, 220)
+        row += 2
+
+        // -- Cursor section --
+        self.writeStr(row, 2, "Cursor", 200, 170, 100)
+        row += 1
+
+        var sb7: StringBuilder = .{}
+        sb7.appendInt(state.cursor_line)
+        self.writeStr(row, label_col, "line", 130, 130, 140)
+        self.writeStr(row, value_col, sb7.toString(), 220, 220, 220)
+        row += 1
+
+        var sb8: StringBuilder = .{}
+        sb8.appendInt(state.cursor_col)
+        self.writeStr(row, label_col, "col", 130, 130, 140)
+        self.writeStr(row, value_col, sb8.toString(), 220, 220, 220)
+        row += 1
+
+        var sb9: StringBuilder = .{}
+        sb9.appendInt(state.cursor_offset)
+        self.writeStr(row, label_col, "offset", 130, 130, 140)
+        self.writeStr(row, value_col, sb9.toString(), 220, 220, 220)
+        row += 1
+
+        var sb10: StringBuilder = .{}
+        sb10.appendInt(state.cursor_goal_col)
+        self.writeStr(row, label_col, "goal_col", 130, 130, 140)
+        self.writeStr(row, value_col, sb10.toString(), 220, 220, 220)
+        row += 2
+
+        // -- Selection section --
+        self.writeStr(row, 2, "Selection", 200, 170, 100)
+        row += 1
+
+        var sb11: StringBuilder = .{}
+        sb11.appendInt(state.selection_count)
+        self.writeStr(row, label_col, "ranges", 130, 130, 140)
+        self.writeStr(row, value_col, sb11.toString(), 220, 220, 220)
+        row += 1
+
+        var sb12: StringBuilder = .{}
+        sb12.appendInt(state.primary_index)
+        self.writeStr(row, label_col, "primary_index", 130, 130, 140)
+        self.writeStr(row, value_col, sb12.toString(), 220, 220, 220)
+        row += 2
+
+        // -- History section --
+        self.writeStr(row, 2, "History", 200, 170, 100)
+        row += 1
+
+        var sb13: StringBuilder = .{}
+        sb13.appendInt(state.revision_count)
+        self.writeStr(row, label_col, "revisions", 130, 130, 140)
+        self.writeStr(row, value_col, sb13.toString(), 220, 220, 220)
+        row += 1
+
+        var sb14: StringBuilder = .{}
+        sb14.appendInt(state.history_current)
+        self.writeStr(row, label_col, "current", 130, 130, 140)
+        self.writeStr(row, value_col, sb14.toString(), 220, 220, 220)
+        row += 1
+
+        self.writeStr(row, label_col, "atRoot", 130, 130, 140)
+        if (state.at_root) {
+            self.writeStr(row, value_col, "yes", 220, 180, 80)
+        } else {
+            self.writeStr(row, value_col, "no", 150, 150, 150)
+        }
+        row += 1
+
+        self.writeStr(row, label_col, "canRedo", 130, 130, 140)
+        if (state.can_redo) {
+            self.writeStr(row, value_col, "yes", 100, 220, 100)
+        } else {
+            self.writeStr(row, value_col, "no", 150, 150, 150)
+        }
     }
 
     // ========================================================================

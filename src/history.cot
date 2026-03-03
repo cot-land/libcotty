@@ -26,6 +26,7 @@ struct Revision {
     inversion: Transaction,
     cursor_before: int,
     cursor_after: int,
+    group_with_previous: bool,
 }
 
 /// History manages undo/redo as a tree of revisions.
@@ -38,6 +39,7 @@ struct Revision {
 struct History {
     revisions: List(Revision),
     current: int,
+    should_group: bool,
 
     /// Create a new history with an empty root revision.
     static fn init() History {
@@ -50,9 +52,15 @@ struct History {
             inversion: Transaction.init(),
             cursor_before: 0,
             cursor_after: 0,
+            group_with_previous: false,
         }
         revisions.append(root)
-        return History { revisions: revisions, current: 0 }
+        return History { revisions: revisions, current: 0, should_group: false }
+    }
+
+    /// Break the current undo group. The next commit starts a new group.
+    fn breakGroup() void {
+        self.should_group = false
     }
 
     /// Whether we're at the root (nothing to undo).
@@ -89,33 +97,59 @@ struct History {
             inversion: inv,
             cursor_before: cursor_before,
             cursor_after: cursor_after,
+            group_with_previous: self.should_group,
         }
         self.revisions.append(rev)
         self.current = new_idx
+        // Next consecutive edit will be grouped with this one
+        self.should_group = true
     }
 
     /// Undo: apply the current revision's inversion to the buffer.
+    /// Undoes the entire undo group (all consecutive grouped revisions).
     /// Returns the cursor position to restore, or -1 if already at root.
     fn undo(buf: *Buffer) int {
         if (self.current == 0) { return -1 }
-        const rev = self.revisions.get(self.current)
-        var inv = rev.inversion
-        inv.apply(buf)
-        self.current = rev.parent
-        return rev.cursor_before
+        var restore_cursor = -1
+        while (self.current != 0) {
+            const rev = self.revisions.get(self.current)
+            var inv = rev.inversion
+            inv.apply(buf)
+            restore_cursor = rev.cursor_before
+            const was_grouped = rev.group_with_previous
+            self.current = rev.parent
+            if (!was_grouped) { break }
+        }
+        self.should_group = false
+        return restore_cursor
     }
 
     /// Redo: follow last_child and apply its transaction.
+    /// Redoes the entire undo group (all consecutive grouped revisions).
     /// Returns the cursor position to restore, or -1 if no redo path.
     fn redo(buf: *Buffer) int {
-        const rev = self.revisions.get(self.current)
+        var rev = self.revisions.get(self.current)
         if (rev.last_child < 0) { return -1 }
-        const child_idx = rev.last_child
-        const child = self.revisions.get(child_idx)
-        var txn = child.transaction
-        txn.apply(buf)
-        self.current = child_idx
-        return child.cursor_after
+        var restore_cursor = -1
+        while (rev.last_child >= 0) {
+            const child_idx = rev.last_child
+            const child = self.revisions.get(child_idx)
+            var txn = child.transaction
+            txn.apply(buf)
+            self.current = child_idx
+            restore_cursor = child.cursor_after
+            // Continue redoing if the next child is grouped with this one
+            if (child.last_child >= 0) {
+                const next = self.revisions.get(child.last_child)
+                if (next.group_with_previous) {
+                    rev = child
+                    continue
+                }
+            }
+            break
+        }
+        self.should_group = false
+        return restore_cursor
     }
 }
 
@@ -202,6 +236,8 @@ test "history multiple edits undo redo" {
     h.commit(t1, &buf, 1, 2)
     t1.apply(&buf)
     @assertEq(buf.toString(), "ab")
+    // Break group so edit 2 is separate
+    h.breakGroup()
     // Edit 2: "ab" → "abc"
     var c2: List(Change) = .{}
     c2.append(Change { from: 2, to: 2, text: "c" })
@@ -285,4 +321,104 @@ test "history replace and undo" {
     const cursor = h.undo(&buf)
     @assertEq(cursor, 11)
     @assertEq(buf.toString(), "hello world")
+}
+
+test "history group undo" {
+    // Simulate typing "abc" — consecutive edits should group
+    var h = History.init()
+    var buf = Buffer.initWithContent("")
+    // Edit 1: "" → "a" (should_group is false, starts new group)
+    var c1: List(Change) = .{}
+    c1.append(Change { from: 0, to: 0, text: "a" })
+    var t1 = Transaction.fromChanges(0, &c1)
+    h.commit(t1, &buf, 0, 1)
+    t1.apply(&buf)
+    // After commit, should_group is true
+    // Edit 2: "a" → "ab" (should_group is true, grouped)
+    var c2: List(Change) = .{}
+    c2.append(Change { from: 1, to: 1, text: "b" })
+    var t2 = Transaction.fromChanges(1, &c2)
+    h.commit(t2, &buf, 1, 2)
+    t2.apply(&buf)
+    // Edit 3: "ab" → "abc" (grouped)
+    var c3: List(Change) = .{}
+    c3.append(Change { from: 2, to: 2, text: "c" })
+    var t3 = Transaction.fromChanges(2, &c3)
+    h.commit(t3, &buf, 2, 3)
+    t3.apply(&buf)
+    @assertEq(buf.toString(), "abc")
+    // Single undo should undo all three (they're grouped)
+    const cursor = h.undo(&buf)
+    @assertEq(cursor, 0)
+    @assertEq(buf.toString(), "")
+    @assertEq(h.atRoot(), true)
+}
+
+test "history group break" {
+    // Simulate typing "ab", moving, then typing "cd"
+    var h = History.init()
+    var buf = Buffer.initWithContent("")
+    // Type "a"
+    var c1: List(Change) = .{}
+    c1.append(Change { from: 0, to: 0, text: "a" })
+    var t1 = Transaction.fromChanges(0, &c1)
+    h.commit(t1, &buf, 0, 1)
+    t1.apply(&buf)
+    // Type "b" (grouped with "a")
+    var c2: List(Change) = .{}
+    c2.append(Change { from: 1, to: 1, text: "b" })
+    var t2 = Transaction.fromChanges(1, &c2)
+    h.commit(t2, &buf, 1, 2)
+    t2.apply(&buf)
+    // Break group (simulates cursor movement)
+    h.breakGroup()
+    // Type "c" (new group)
+    var c3: List(Change) = .{}
+    c3.append(Change { from: 2, to: 2, text: "c" })
+    var t3 = Transaction.fromChanges(2, &c3)
+    h.commit(t3, &buf, 2, 3)
+    t3.apply(&buf)
+    // Type "d" (grouped with "c")
+    var c4: List(Change) = .{}
+    c4.append(Change { from: 3, to: 3, text: "d" })
+    var t4 = Transaction.fromChanges(3, &c4)
+    h.commit(t4, &buf, 3, 4)
+    t4.apply(&buf)
+    @assertEq(buf.toString(), "abcd")
+    // Undo once: removes "cd"
+    var cursor = h.undo(&buf)
+    @assertEq(cursor, 2)
+    @assertEq(buf.toString(), "ab")
+    // Undo again: removes "ab"
+    cursor = h.undo(&buf)
+    @assertEq(cursor, 0)
+    @assertEq(buf.toString(), "")
+}
+
+test "history group redo" {
+    // Type "abc" as a group, undo, then redo should restore all
+    var h = History.init()
+    var buf = Buffer.initWithContent("")
+    var c1: List(Change) = .{}
+    c1.append(Change { from: 0, to: 0, text: "a" })
+    var t1 = Transaction.fromChanges(0, &c1)
+    h.commit(t1, &buf, 0, 1)
+    t1.apply(&buf)
+    var c2: List(Change) = .{}
+    c2.append(Change { from: 1, to: 1, text: "b" })
+    var t2 = Transaction.fromChanges(1, &c2)
+    h.commit(t2, &buf, 1, 2)
+    t2.apply(&buf)
+    var c3: List(Change) = .{}
+    c3.append(Change { from: 2, to: 2, text: "c" })
+    var t3 = Transaction.fromChanges(2, &c3)
+    h.commit(t3, &buf, 2, 3)
+    t3.apply(&buf)
+    @assertEq(buf.toString(), "abc")
+    h.undo(&buf)
+    @assertEq(buf.toString(), "")
+    // Redo should restore entire group
+    const cursor = h.redo(&buf)
+    @assertEq(cursor, 3)
+    @assertEq(buf.toString(), "abc")
 }

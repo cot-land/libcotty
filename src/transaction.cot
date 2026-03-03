@@ -11,7 +11,12 @@
 /// struct. Always store in a local first. See selection.cot header.
 
 import "std/list"
+import "std/string"
+import "std/debug"
 import "buffer"
+
+/// Global debug flag: when true, apply() logs every op and validates buffer after each.
+var g_changeset_debug: bool = false
 
 /// Operation types for changesets.
 const OP_RETAIN: int = 0
@@ -163,9 +168,57 @@ struct ChangeSet {
         self.len_after += n
     }
 
+    /// Print all operations to stderr for debugging.
+    fn dumpOps(label: string) void {
+        var hdr: StringBuilder = .{}
+        hdr.append("[CHANGESET] ")
+        hdr.append(label)
+        hdr.append(" | ops=")
+        hdr.appendInt(self.ops.count)
+        hdr.append(" len=")
+        hdr.appendInt(self.len)
+        hdr.append(" len_after=")
+        hdr.appendInt(self.len_after)
+        println(hdr.toString())
+        var i = 0
+        while (i < self.ops.count) {
+            const op = self.ops.get(i)
+            var sb: StringBuilder = .{}
+            sb.append("  op[")
+            sb.appendInt(i)
+            sb.append("] ")
+            if (op.kind == OP_RETAIN) { sb.append("RETAIN") }
+            if (op.kind == OP_DELETE) { sb.append("DELETE") }
+            if (op.kind == OP_INSERT) { sb.append("INSERT") }
+            sb.append(" n=")
+            sb.appendInt(op.n)
+            if (op.kind == OP_INSERT) {
+                sb.append(" text_off=")
+                sb.appendInt(op.text_off)
+            }
+            println(sb.toString())
+            i += 1
+        }
+    }
+
     /// Apply this changeset to a buffer. Returns false if doc length mismatch.
     fn apply(buf: *Buffer) bool {
-        if (buf.len() != self.len) { return false }
+        if (buf.len() != self.len) {
+            if (g_changeset_debug) {
+                var sb: StringBuilder = .{}
+                sb.append("[CHANGESET] LENGTH MISMATCH: buf.len()=")
+                sb.appendInt(buf.len())
+                sb.append(" changeset.len=")
+                sb.appendInt(self.len)
+                println(sb.toString())
+                self.dumpOps("FAILED apply")
+            }
+            return false
+        }
+        if (g_changeset_debug) {
+            self.dumpOps("apply BEGIN")
+            buf.dumpState("before apply")
+        }
         var pos = 0
         var i = 0
         while (i < self.ops.count) {
@@ -190,7 +243,26 @@ struct ChangeSet {
                 }
                 pos += op.n
             }
+            if (g_changeset_debug) {
+                var sb: StringBuilder = .{}
+                sb.append("  after op[")
+                sb.appendInt(i)
+                sb.append("]")
+                buf.dumpState(sb.toString())
+                if (!buf.validate()) {
+                    var err: StringBuilder = .{}
+                    err.append("[CHANGESET] CORRUPTION after op[")
+                    err.appendInt(i)
+                    err.append("]")
+                    println(err.toString())
+                    self.dumpOps("CORRUPT apply")
+                    @trap()
+                }
+            }
             i += 1
+        }
+        if (g_changeset_debug) {
+            buf.dumpState("after apply")
         }
         return true
     }

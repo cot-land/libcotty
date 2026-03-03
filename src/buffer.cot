@@ -9,6 +9,10 @@
 
 import "std/list"
 import "std/string"
+import "std/debug"
+
+/// Global debug flag: when true, validate() runs after every mutation.
+var g_buffer_debug: bool = false
 
 /// Initial gap size when creating a new buffer.
 const INITIAL_GAP_SIZE: int = 64
@@ -54,6 +58,56 @@ struct Buffer {
         return self.gap_end - self.gap_start
     }
 
+    /// Validate gap buffer invariants. Returns false and prints diagnostic on failure.
+    fn validate() bool {
+        if (self.gap_start < 0) {
+            self.dumpState("[VALIDATE FAIL] gap_start < 0")
+            return false
+        }
+        if (self.gap_start > self.gap_end) {
+            self.dumpState("[VALIDATE FAIL] gap_start > gap_end")
+            return false
+        }
+        if (self.gap_end > self.data.count) {
+            self.dumpState("[VALIDATE FAIL] gap_end > data.count")
+            return false
+        }
+        const logical = self.data.count - self.gapSize()
+        if (logical < 0) {
+            self.dumpState("[VALIDATE FAIL] negative logical length")
+            return false
+        }
+        return true
+    }
+
+    /// Print gap buffer state to stderr for debugging.
+    fn dumpState(label: string) void {
+        var sb: StringBuilder = .{}
+        sb.append("[BUFFER] ")
+        sb.append(label)
+        sb.append(" | len=")
+        sb.appendInt(self.len())
+        sb.append(" gap=[")
+        sb.appendInt(self.gap_start)
+        sb.append(",")
+        sb.appendInt(self.gap_end)
+        sb.append(") data.count=")
+        sb.appendInt(self.data.count)
+        sb.append(" gapSize=")
+        sb.appendInt(self.gapSize())
+        println(sb.toString())
+    }
+
+    /// Validate after mutation if debug mode is on. Traps on failure.
+    fn debugValidate(label: string) void {
+        if (g_buffer_debug) {
+            if (!self.validate()) {
+                self.dumpState(label)
+                @trap()
+            }
+        }
+    }
+
     /// Insert a byte at the current gap position.
     fn insert(ch: int) void {
         if (self.gap_start == self.gap_end) {
@@ -61,6 +115,7 @@ struct Buffer {
         }
         self.data.set(self.gap_start, @intCast(u8, ch))
         self.gap_start += 1
+        self.debugValidate("after insert")
     }
 
     /// Delete one byte before the gap (backspace).
@@ -68,6 +123,7 @@ struct Buffer {
         if (self.gap_start > 0) {
             self.gap_start -= 1
         }
+        self.debugValidate("after deleteBack")
     }
 
     /// Delete one byte after the gap (delete key).
@@ -75,6 +131,7 @@ struct Buffer {
         if (self.gap_end < self.data.count) {
             self.gap_end += 1
         }
+        self.debugValidate("after deleteForward")
     }
 
     /// Move the gap to a specific position in the logical text.
@@ -82,10 +139,15 @@ struct Buffer {
         if (pos == self.gap_start) { return }
 
         if (pos < self.gap_start) {
-            // Move gap left: shift bytes from [pos, gap_start) to after gap
+            // Move gap left: shift bytes from [pos, gap_start) to end at gap_end.
+            // MUST copy backward: when shift > gapSize, source and dest overlap.
+            // Forward copy would overwrite source bytes before they're read.
             const shift = self.gap_start - pos
-            for i in 0..shift {
+            var i = shift - 1
+            while (i >= 0) {
                 self.data.set(self.gap_end - shift + i, self.data.get(pos + i))
+                if (i == 0) { break }
+                i -= 1
             }
             self.gap_start = pos
             self.gap_end -= shift
@@ -98,6 +160,7 @@ struct Buffer {
             self.gap_start += shift
             self.gap_end += shift
         }
+        self.debugValidate("after moveGapTo")
     }
 
     /// Get the byte at a logical position (accounting for the gap).
@@ -118,6 +181,23 @@ struct Buffer {
             }
         }
         return count
+    }
+
+    /// Return the length of the longest line in the buffer.
+    fn maxLineLength() int {
+        var max_len: i64 = 0
+        var cur_len: i64 = 0
+        const text_len = self.len()
+        for i in 0..text_len {
+            if (self.charAt(i) == '\n') {
+                if (cur_len > max_len) { max_len = cur_len }
+                cur_len = 0
+            } else {
+                cur_len += 1
+            }
+        }
+        if (cur_len > max_len) { max_len = cur_len }
+        return max_len
     }
 
     /// Get the content of a specific line (0-indexed). Returns the line without newline.
@@ -229,6 +309,7 @@ struct Buffer {
         }
 
         self.gap_end += new_gap_size
+        self.debugValidate("after growGap")
     }
 }
 
@@ -390,4 +471,43 @@ test "buffer line start offset empty lines" {
 test "buffer line start offset past end" {
     var buf = Buffer.initWithContent("hello")
     @assertEq(buf.lineStartOffset(5), 5)
+}
+
+test "buffer validate passes on good state" {
+    var buf = Buffer.initWithContent("hello")
+    @assertEq(buf.validate(), true)
+}
+
+test "buffer large content via string literal" {
+    // 88 bytes — past INITIAL_GAP_SIZE of 64
+    var buf = Buffer.initWithContent("aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc\ndddddddddd\neeeeeeeeee\nffffffffff\ngggggggggg\nhhhhhhhhhh\n")
+    @assertEq(buf.validate(), true)
+    @assertEq(buf.lineCount(), 9)
+    @assertEq(buf.lineAt(0), "aaaaaaaaaa")
+    @assertEq(buf.lineAt(7), "hhhhhhhhhh")
+}
+
+test "buffer large content moveGapTo middle" {
+    var buf = Buffer.initWithContent("aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc\ndddddddddd\neeeeeeeeee\nffffffffff\ngggggggggg\nhhhhhhhhhh\n")
+    const orig_len = buf.len()
+    // Move gap to middle of content
+    buf.moveGapTo(40)
+    @assertEq(buf.validate(), true)
+    @assertEq(buf.len(), orig_len)
+    @assertEq(buf.lineAt(0), "aaaaaaaaaa")
+    @assertEq(buf.lineAt(7), "hhhhhhhhhh")
+}
+
+test "buffer large content insert after moveGapTo" {
+    var buf = Buffer.initWithContent("aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc\ndddddddddd\neeeeeeeeee\nffffffffff\ngggggggggg\nhhhhhhhhhh\n")
+    const orig_len = buf.len()
+    buf.moveGapTo(40)
+    buf.insert('X')
+    @assertEq(buf.validate(), true)
+    @assertEq(buf.len(), orig_len + 1)
+    // Line count should be unchanged (no newline inserted)
+    @assertEq(buf.lineCount(), 9)
+    // First and last lines should be intact
+    @assertEq(buf.lineAt(0), "aaaaaaaaaa")
+    @assertEq(buf.lineAt(7), "hhhhhhhhhh")
 }

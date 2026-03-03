@@ -3038,15 +3038,15 @@ struct TerminalState {
     /// precise: 1 for trackpad (pixel deltas), 0 for discrete mouse wheel.
     /// cell_height: cell height in millipoints (points * 1000).
     /// col, row: 1-indexed terminal grid position.
-    fn scrollEvent(fd: i64, delta: i64, precise: i64, cell_height: i64, col: i64, row: i64) void {
+    fn scrollEvent(fd: i64, delta: i64, precise: i64, cell_height: i64, col: i64, row: i64, multiplier: i64) void {
         if (cell_height <= 0) { return }
 
         // Normalize delta to millipoints.
         // Ghostty: precision scrolls use raw pixel deltas (Swift already 2x'd).
-        // Discrete scrolls convert "line ticks" to pixels: tick * cell_height * 3.
+        // Discrete scrolls convert "line ticks" to pixels: tick * cell_height * multiplier.
         var adjusted = delta
         if (precise == 0) {
-            adjusted = delta * cell_height * 3 / 1000
+            adjusted = delta * cell_height * multiplier / 1000
         }
 
         // Accumulate fractional scroll (Ghostty: mouse.pending_scroll_y)

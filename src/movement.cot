@@ -1,0 +1,274 @@
+/// Pure movement functions for editor navigation.
+/// Port of Zed's movement.rs pattern — functions take buffer + position, return new position.
+/// Testable and reusable by both standard editor and future vim extension.
+///
+/// Reference: references/zed/crates/editor/src/movement.rs
+
+import "buffer"
+
+/// Result of a vertical movement: new line, col, and byte offset.
+struct MoveResult {
+    line: int,
+    col: int,
+    offset: int,
+}
+
+/// Character category for word movement.
+/// 0 = whitespace, 1 = word (alnum + _), 2 = punctuation
+fn charCategory(ch: int) int {
+    if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') { return 0 }
+    if (ch == '_') { return 1 }
+    if (ch >= 'a' and ch <= 'z') { return 1 }
+    if (ch >= 'A' and ch <= 'Z') { return 1 }
+    if (ch >= '0' and ch <= '9') { return 1 }
+    return 2
+}
+
+/// Move one position left. Returns new offset (clamped to 0).
+fn movePosLeft(buf: *Buffer, offset: int) int {
+    if (offset > 0) { return offset - 1 }
+    return 0
+}
+
+/// Move one position right. Returns new offset (clamped to buf.len()).
+fn movePosRight(buf: *Buffer, offset: int) int {
+    if (offset < buf.len()) { return offset + 1 }
+    return buf.len()
+}
+
+/// Move up one line, targeting goal_col. Returns MoveResult.
+/// If already on line 0, returns current position unchanged.
+fn moveUp(buf: *Buffer, line: int, col: int, goal_col: int) MoveResult {
+    if (line == 0) {
+        return MoveResult { line: 0, col: col, offset: buf.lineStartOffset(0) + col }
+    }
+    const target_line = line - 1
+    const line_len = buf.lineLength(target_line)
+    var target_col = goal_col
+    if (target_col > line_len) { target_col = line_len }
+    const new_offset = buf.lineStartOffset(target_line) + target_col
+    return MoveResult { line: target_line, col: target_col, offset: new_offset }
+}
+
+/// Move down one line, targeting goal_col. Returns MoveResult.
+/// If already on last line, returns current position unchanged.
+fn moveDown(buf: *Buffer, line: int, col: int, goal_col: int, total_lines: int) MoveResult {
+    if (line >= total_lines - 1) {
+        return MoveResult { line: line, col: col, offset: buf.lineStartOffset(line) + col }
+    }
+    const target_line = line + 1
+    const line_len = buf.lineLength(target_line)
+    var target_col = goal_col
+    if (target_col > line_len) { target_col = line_len }
+    const new_offset = buf.lineStartOffset(target_line) + target_col
+    return MoveResult { line: target_line, col: target_col, offset: new_offset }
+}
+
+/// Move to the start of the current line. Returns new offset.
+fn moveLineStart(buf: *Buffer, line: int) int {
+    return buf.lineStartOffset(line)
+}
+
+/// Move to the end of the current line. Returns new offset.
+fn moveLineEnd(buf: *Buffer, line: int) int {
+    return buf.lineStartOffset(line) + buf.lineLength(line)
+}
+
+/// Move to the start of the buffer. Returns 0.
+fn moveToBufferStart() int {
+    return 0
+}
+
+/// Move to the end of the buffer. Returns buf.len().
+fn moveToBufferEnd(buf: *Buffer) int {
+    return buf.len()
+}
+
+/// Move forward by one word. Skip current category, skip whitespace, land on next word start.
+fn moveWordForward(buf: *Buffer, offset: int) int {
+    const buf_len = buf.len()
+    if (offset >= buf_len) { return buf_len }
+    var pos = offset
+    // Get category of current char and skip same category
+    const start_cat = charCategory(buf.charAt(pos))
+    while (pos < buf_len) {
+        if (charCategory(buf.charAt(pos)) != start_cat) { break }
+        pos += 1
+    }
+    // Skip whitespace
+    while (pos < buf_len) {
+        if (charCategory(buf.charAt(pos)) != 0) { break }
+        pos += 1
+    }
+    return pos
+}
+
+/// Move backward by one word. Skip whitespace backward, then skip word backward.
+fn moveWordBackward(buf: *Buffer, offset: int) int {
+    if (offset == 0) { return 0 }
+    var pos = offset - 1
+    // Skip whitespace backward
+    while (pos > 0) {
+        if (charCategory(buf.charAt(pos)) != 0) { break }
+        pos -= 1
+    }
+    // Get category and skip backward
+    const cat = charCategory(buf.charAt(pos))
+    while (pos > 0) {
+        if (charCategory(buf.charAt(pos - 1)) != cat) { break }
+        pos -= 1
+    }
+    return pos
+}
+
+/// Move to end of current word. Skip whitespace forward, then skip word, land on last char.
+fn moveWordEnd(buf: *Buffer, offset: int) int {
+    const buf_len = buf.len()
+    if (offset >= buf_len - 1) { return buf_len - 1 }
+    var pos = offset + 1
+    // Skip whitespace
+    while (pos < buf_len) {
+        if (charCategory(buf.charAt(pos)) != 0) { break }
+        pos += 1
+    }
+    // Skip same category
+    if (pos < buf_len) {
+        const cat = charCategory(buf.charAt(pos))
+        while (pos < buf_len - 1) {
+            if (charCategory(buf.charAt(pos + 1)) != cat) { break }
+            pos += 1
+        }
+    }
+    return pos
+}
+
+/// Compute line and column from byte offset.
+fn offsetToLineCol(buf: *Buffer, offset: int) MoveResult {
+    var line = 0
+    var col = 0
+    for i in 0..offset {
+        if (buf.charAt(i) == '\n') {
+            line += 1
+            col = 0
+        } else {
+            col += 1
+        }
+    }
+    return MoveResult { line: line, col: col, offset: offset }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "movePosLeft at start" {
+    var buf = Buffer.initWithContent("hello")
+    @assertEq(movePosLeft(&buf, 0), 0)
+}
+
+test "movePosLeft from middle" {
+    var buf = Buffer.initWithContent("hello")
+    @assertEq(movePosLeft(&buf, 3), 2)
+}
+
+test "movePosRight at end" {
+    var buf = Buffer.initWithContent("hello")
+    @assertEq(movePosRight(&buf, 5), 5)
+}
+
+test "movePosRight from middle" {
+    var buf = Buffer.initWithContent("hello")
+    @assertEq(movePosRight(&buf, 3), 4)
+}
+
+test "moveUp from first line stays" {
+    var buf = Buffer.initWithContent("hello\nworld")
+    const r = moveUp(&buf, 0, 3, 3)
+    @assertEq(r.line, 0)
+    @assertEq(r.col, 3)
+}
+
+test "moveUp preserves goal col" {
+    var buf = Buffer.initWithContent("long line here\nhi\nanother long line")
+    // On line 2, col 15. Move up to line 1 (len 2), goal_col 15 → clamped to 2
+    const r = moveUp(&buf, 2, 15, 15)
+    @assertEq(r.line, 1)
+    @assertEq(r.col, 2)
+}
+
+test "moveDown preserves goal col" {
+    var buf = Buffer.initWithContent("long line here\nhi\nanother long line")
+    // On line 0, col 10, move down to line 1 (len 2), goal 10 → clamped to 2
+    const r1 = moveDown(&buf, 0, 10, 10, 3)
+    @assertEq(r1.line, 1)
+    @assertEq(r1.col, 2)
+    // Continue down to line 2, goal still 10
+    const r2 = moveDown(&buf, 1, 2, 10, 3)
+    @assertEq(r2.line, 2)
+    @assertEq(r2.col, 10) // goal restored!
+}
+
+test "moveDown from last line stays" {
+    var buf = Buffer.initWithContent("hello\nworld")
+    const r = moveDown(&buf, 1, 3, 3, 2)
+    @assertEq(r.line, 1)
+    @assertEq(r.col, 3)
+}
+
+test "moveLineStart" {
+    var buf = Buffer.initWithContent("hello\nworld")
+    @assertEq(moveLineStart(&buf, 1), 6)
+}
+
+test "moveLineEnd" {
+    var buf = Buffer.initWithContent("hello\nworld")
+    @assertEq(moveLineEnd(&buf, 0), 5)
+    @assertEq(moveLineEnd(&buf, 1), 11)
+}
+
+test "moveToBufferStart" {
+    @assertEq(moveToBufferStart(), 0)
+}
+
+test "moveToBufferEnd" {
+    var buf = Buffer.initWithContent("hello")
+    @assertEq(moveToBufferEnd(&buf), 5)
+}
+
+test "moveWordForward" {
+    var buf = Buffer.initWithContent("hello world foo")
+    @assertEq(moveWordForward(&buf, 0), 6)   // skip "hello" + space → "world"
+    @assertEq(moveWordForward(&buf, 6), 12)  // skip "world" + space → "foo"
+    @assertEq(moveWordForward(&buf, 12), 15) // skip "foo" → end
+}
+
+test "moveWordBackward" {
+    var buf = Buffer.initWithContent("hello world foo")
+    @assertEq(moveWordBackward(&buf, 15), 12) // back to "foo"
+    @assertEq(moveWordBackward(&buf, 12), 6)  // back to "world"
+    @assertEq(moveWordBackward(&buf, 6), 0)   // back to "hello"
+    @assertEq(moveWordBackward(&buf, 0), 0)   // stays at 0
+}
+
+test "moveWordForward punctuation" {
+    var buf = Buffer.initWithContent("foo.bar baz")
+    @assertEq(moveWordForward(&buf, 0), 3)  // "foo" → "."
+    @assertEq(moveWordForward(&buf, 3), 4)  // "." → "bar"
+    @assertEq(moveWordForward(&buf, 4), 8)  // "bar" + space → "baz"
+}
+
+test "offsetToLineCol" {
+    var buf = Buffer.initWithContent("hello\nworld\nfoo")
+    const r0 = offsetToLineCol(&buf, 0)
+    @assertEq(r0.line, 0)
+    @assertEq(r0.col, 0)
+    const r5 = offsetToLineCol(&buf, 5)
+    @assertEq(r5.line, 0)
+    @assertEq(r5.col, 5)
+    const r8 = offsetToLineCol(&buf, 8)
+    @assertEq(r8.line, 1)
+    @assertEq(r8.col, 2)
+    const r14 = offsetToLineCol(&buf, 14)
+    @assertEq(r14.line, 2)
+    @assertEq(r14.col, 2)
+}

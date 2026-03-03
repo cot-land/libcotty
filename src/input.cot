@@ -48,6 +48,20 @@ const InputAction = enum(u8) {
     move_word_forward,
     move_word_backward,
     move_word_end,
+    delete_selection,
+    yank,
+    change_selection,
+    select_left,
+    select_right,
+    select_up,
+    select_down,
+    select_line_start,
+    select_line_end,
+    select_word_forward,
+    select_word_backward,
+    select_all,
+    add_next_occurrence,
+    collapse_cursors,
 
     /// Return a display name for this action.
     fn name() string {
@@ -77,6 +91,20 @@ const InputAction = enum(u8) {
             .move_word_forward => "move_word_forward",
             .move_word_backward => "move_word_backward",
             .move_word_end => "move_word_end",
+            .delete_selection => "delete_selection",
+            .yank => "yank",
+            .change_selection => "change_selection",
+            .select_left => "select_left",
+            .select_right => "select_right",
+            .select_up => "select_up",
+            .select_down => "select_down",
+            .select_line_start => "select_line_start",
+            .select_line_end => "select_line_end",
+            .select_word_forward => "select_word_forward",
+            .select_word_backward => "select_word_backward",
+            .select_all => "select_all",
+            .add_next_occurrence => "add_next_occurrence",
+            .collapse_cursors => "collapse_cursors",
         }
     }
 }
@@ -133,12 +161,20 @@ const KEY_KP_PLUS: int = 298
 const KEY_KP_DIVIDE: int = 299
 const KEY_KP_MINUS: int = 300
 
-/// Map a key event to an editor action.
+/// Map a key event to an editor action (standard editor — no modal dispatch).
 fn keyToAction(event: KeyEvent) InputAction {
     const has_ctrl = (event.mods & MOD_CTRL) != 0
+    const has_shift = (event.mods & MOD_SHIFT) != 0
+    const has_alt = (event.mods & MOD_ALT) != 0
+    const has_super = (event.mods & MOD_SUPER) != 0
 
-    // Ctrl+key shortcuts
-    if (has_ctrl) {
+    // Ctrl+Shift+Z → redo (standard macOS/Linux shortcut)
+    if (has_ctrl and has_shift and event.key == 'Z') {
+        return InputAction.redo
+    }
+
+    // Ctrl+key shortcuts (no shift)
+    if (has_ctrl and !has_shift and !has_alt and !has_super) {
         return switch (event.key) {
             'z' => InputAction.undo,
             'y' => InputAction.redo,
@@ -152,8 +188,40 @@ fn keyToAction(event: KeyEvent) InputAction {
         }
     }
 
-    // Special keys
+    // Shift+Alt+Arrow → select word
+    if (has_shift and has_alt and !has_ctrl and !has_super) {
+        return switch (event.key) {
+            KEY_ARROW_LEFT => InputAction.select_word_backward,
+            KEY_ARROW_RIGHT => InputAction.select_word_forward,
+            else => InputAction.none,
+        }
+    }
+
+    // Alt+Arrow → word movement
+    if (has_alt and !has_shift and !has_ctrl and !has_super) {
+        return switch (event.key) {
+            KEY_ARROW_LEFT => InputAction.move_word_backward,
+            KEY_ARROW_RIGHT => InputAction.move_word_forward,
+            else => InputAction.none,
+        }
+    }
+
+    // Shift+Arrow/Home/End → selection extension
+    if (has_shift and !has_ctrl and !has_alt and !has_super) {
+        return switch (event.key) {
+            KEY_ARROW_LEFT => InputAction.select_left,
+            KEY_ARROW_RIGHT => InputAction.select_right,
+            KEY_ARROW_UP => InputAction.select_up,
+            KEY_ARROW_DOWN => InputAction.select_down,
+            KEY_HOME => InputAction.select_line_start,
+            KEY_END => InputAction.select_line_end,
+            else => InputAction.none,
+        }
+    }
+
+    // No modifiers (or only modifiers we don't care about)
     return switch (event.key) {
+        KEY_ESCAPE => InputAction.collapse_cursors,
         KEY_BACKSPACE => InputAction.delete_back,
         KEY_DELETE => InputAction.delete_forward,
         KEY_ARROW_LEFT => InputAction.move_left,
@@ -174,69 +242,6 @@ fn keyToAction(event: KeyEvent) InputAction {
             return InputAction.none
         },
     }
-}
-
-/// Map a key event to an action based on the current mode.
-/// Escape always enters Normal mode. Insert mode delegates to keyToAction().
-/// Normal mode maps vim-style keys to movement/mode-change actions.
-fn keyToActionInMode(event: KeyEvent, mode: Mode) InputAction {
-    // Escape → Normal mode from any mode
-    if (event.key == KEY_ESCAPE and event.mods == MOD_NONE) {
-        return InputAction.enter_normal
-    }
-
-    if (mode == Mode.Insert) {
-        return keyToAction(event)
-    }
-
-    if (mode == Mode.Normal) {
-        const has_ctrl = (event.mods & MOD_CTRL) != 0
-
-        // Ctrl shortcuts work in Normal mode too
-        if (has_ctrl) {
-            return switch (event.key) {
-                's' => InputAction.save,
-                'q' => InputAction.quit,
-                'n' => InputAction.new_surface,
-                'w' => InputAction.close_surface,
-                else => InputAction.none,
-            }
-        }
-
-        // Normal mode key mappings (no modifiers)
-        if (event.mods == MOD_NONE) {
-            return switch (event.key) {
-                'i' => InputAction.enter_insert,
-                'a' => InputAction.enter_insert_after,
-                'v' => InputAction.enter_select,
-                'h' => InputAction.move_left,
-                'l' => InputAction.move_right,
-                'k' => InputAction.move_up,
-                'j' => InputAction.move_down,
-                'w' => InputAction.move_word_forward,
-                'b' => InputAction.move_word_backward,
-                'e' => InputAction.move_word_end,
-                '0' => InputAction.move_line_start,
-                '$' => InputAction.move_line_end,
-                'u' => InputAction.undo,
-                KEY_ARROW_LEFT => InputAction.move_left,
-                KEY_ARROW_RIGHT => InputAction.move_right,
-                KEY_ARROW_UP => InputAction.move_up,
-                KEY_ARROW_DOWN => InputAction.move_down,
-                else => InputAction.none,
-            }
-        }
-
-        // Shift+U → redo in Normal mode
-        if (event.mods == MOD_SHIFT and event.key == 'U') {
-            return InputAction.redo
-        }
-
-        return InputAction.none
-    }
-
-    // Select mode — same as Normal for now
-    return InputAction.none
 }
 
 // ============================================================================
@@ -321,76 +326,36 @@ test "mode enum values" {
     @assertEq(@intCast(int, Mode.Select), 2)
 }
 
-test "escape enters normal from insert" {
-    const event = KeyEvent { key: KEY_ESCAPE, mods: MOD_NONE }
-    @assertEq(keyToActionInMode(event, Mode.Insert), InputAction.enter_normal)
+test "shift+arrow selects" {
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_LEFT, mods: MOD_SHIFT }), InputAction.select_left)
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_RIGHT, mods: MOD_SHIFT }), InputAction.select_right)
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_UP, mods: MOD_SHIFT }), InputAction.select_up)
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_DOWN, mods: MOD_SHIFT }), InputAction.select_down)
 }
 
-test "escape enters normal from normal" {
-    const event = KeyEvent { key: KEY_ESCAPE, mods: MOD_NONE }
-    @assertEq(keyToActionInMode(event, Mode.Normal), InputAction.enter_normal)
+test "shift+home end selects" {
+    @assertEq(keyToAction(KeyEvent { key: KEY_HOME, mods: MOD_SHIFT }), InputAction.select_line_start)
+    @assertEq(keyToAction(KeyEvent { key: KEY_END, mods: MOD_SHIFT }), InputAction.select_line_end)
 }
 
-test "insert mode delegates to keyToAction" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'a', mods: MOD_NONE }, Mode.Insert), InputAction.insert_char)
-    @assertEq(keyToActionInMode(KeyEvent { key: KEY_BACKSPACE, mods: MOD_NONE }, Mode.Insert), InputAction.delete_back)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'z', mods: MOD_CTRL }, Mode.Insert), InputAction.undo)
+test "alt+arrow word movement" {
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_LEFT, mods: MOD_ALT }), InputAction.move_word_backward)
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_RIGHT, mods: MOD_ALT }), InputAction.move_word_forward)
 }
 
-test "normal mode i enters insert" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'i', mods: MOD_NONE }, Mode.Normal), InputAction.enter_insert)
+test "shift+alt+arrow select word" {
+    const mods = MOD_SHIFT | MOD_ALT
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_LEFT, mods: mods }), InputAction.select_word_backward)
+    @assertEq(keyToAction(KeyEvent { key: KEY_ARROW_RIGHT, mods: mods }), InputAction.select_word_forward)
 }
 
-test "normal mode a enters insert after" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'a', mods: MOD_NONE }, Mode.Normal), InputAction.enter_insert_after)
+test "ctrl+shift+z redo" {
+    const mods = MOD_CTRL | MOD_SHIFT
+    @assertEq(keyToAction(KeyEvent { key: 'Z', mods: mods }), InputAction.redo)
 }
 
-test "normal mode v enters select" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'v', mods: MOD_NONE }, Mode.Normal), InputAction.enter_select)
-}
-
-test "normal mode hjkl movement" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'h', mods: MOD_NONE }, Mode.Normal), InputAction.move_left)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'l', mods: MOD_NONE }, Mode.Normal), InputAction.move_right)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'k', mods: MOD_NONE }, Mode.Normal), InputAction.move_up)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'j', mods: MOD_NONE }, Mode.Normal), InputAction.move_down)
-}
-
-test "normal mode word movement" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'w', mods: MOD_NONE }, Mode.Normal), InputAction.move_word_forward)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'b', mods: MOD_NONE }, Mode.Normal), InputAction.move_word_backward)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'e', mods: MOD_NONE }, Mode.Normal), InputAction.move_word_end)
-}
-
-test "normal mode line start end" {
-    @assertEq(keyToActionInMode(KeyEvent { key: '0', mods: MOD_NONE }, Mode.Normal), InputAction.move_line_start)
-    @assertEq(keyToActionInMode(KeyEvent { key: '$', mods: MOD_NONE }, Mode.Normal), InputAction.move_line_end)
-}
-
-test "normal mode undo redo" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'u', mods: MOD_NONE }, Mode.Normal), InputAction.undo)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'U', mods: MOD_SHIFT }, Mode.Normal), InputAction.redo)
-}
-
-test "normal mode ctrl shortcuts" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 's', mods: MOD_CTRL }, Mode.Normal), InputAction.save)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'q', mods: MOD_CTRL }, Mode.Normal), InputAction.quit)
-}
-
-test "normal mode printable char does nothing" {
-    @assertEq(keyToActionInMode(KeyEvent { key: 'x', mods: MOD_NONE }, Mode.Normal), InputAction.none)
-    @assertEq(keyToActionInMode(KeyEvent { key: 'z', mods: MOD_NONE }, Mode.Normal), InputAction.none)
-}
-
-test "normal mode arrows" {
-    @assertEq(keyToActionInMode(KeyEvent { key: KEY_ARROW_LEFT, mods: MOD_NONE }, Mode.Normal), InputAction.move_left)
-    @assertEq(keyToActionInMode(KeyEvent { key: KEY_ARROW_RIGHT, mods: MOD_NONE }, Mode.Normal), InputAction.move_right)
-    @assertEq(keyToActionInMode(KeyEvent { key: KEY_ARROW_UP, mods: MOD_NONE }, Mode.Normal), InputAction.move_up)
-    @assertEq(keyToActionInMode(KeyEvent { key: KEY_ARROW_DOWN, mods: MOD_NONE }, Mode.Normal), InputAction.move_down)
-}
-
-test "action name new variants" {
-    @assertEq(InputAction.enter_insert.name(), "enter_insert")
-    @assertEq(InputAction.enter_normal.name(), "enter_normal")
-    @assertEq(InputAction.move_word_forward.name(), "move_word_forward")
+test "action name select variants" {
+    @assertEq(InputAction.select_left.name(), "select_left")
+    @assertEq(InputAction.select_all.name(), "select_all")
+    @assertEq(InputAction.select_word_forward.name(), "select_word_forward")
 }

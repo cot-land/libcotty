@@ -50,6 +50,7 @@ const ACTION_QUIT: i64 = 1
 const ACTION_NEW_WINDOW: i64 = 2
 const ACTION_CLOSE_SURFACE: i64 = 3
 const ACTION_MARK_DIRTY: i64 = 4
+const ACTION_YANK: i64 = 5
 
 // ============================================================================
 // Helpers
@@ -210,11 +211,11 @@ export fn cotty_surface_free(surface: i64) void {
 // Surface input
 // ============================================================================
 
-/// Send a key event to a surface. Routes through keyToActionInMode dispatch.
+/// Send a key event to a surface. Routes through standard keyToAction dispatch.
 export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
     const event = KeyEvent { key: key, mods: mods }
     const ptr = getSurfacePtr(surface)
-    const action = keyToActionInMode(event, ptr.mode)
+    const action = keyToAction(event)
 
     switch (action) {
         InputAction.insert_char => {
@@ -243,30 +244,29 @@ export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
             g_action_tag = ACTION_MARK_DIRTY
             g_action_surface = surface
         },
-        InputAction.move_left => {
-            ptr.handleInput(InputAction.move_left, 0)
-        },
-        InputAction.move_right => {
-            ptr.handleInput(InputAction.move_right, 0)
-        },
-        InputAction.move_up => {
-            ptr.handleInput(InputAction.move_up, 0)
-        },
-        InputAction.move_down => {
-            ptr.handleInput(InputAction.move_down, 0)
-        },
-        InputAction.move_line_start => {
-            ptr.handleInput(InputAction.move_line_start, 0)
-        },
-        InputAction.move_line_end => {
-            ptr.handleInput(InputAction.move_line_end, 0)
-        },
-        InputAction.page_up => {
-            ptr.handleInput(InputAction.page_up, 0)
-        },
-        InputAction.page_down => {
-            ptr.handleInput(InputAction.page_down, 0)
-        },
+        InputAction.move_left => { ptr.handleInput(action, 0) },
+        InputAction.move_right => { ptr.handleInput(action, 0) },
+        InputAction.move_up => { ptr.handleInput(action, 0) },
+        InputAction.move_down => { ptr.handleInput(action, 0) },
+        InputAction.move_line_start => { ptr.handleInput(action, 0) },
+        InputAction.move_line_end => { ptr.handleInput(action, 0) },
+        InputAction.page_up => { ptr.handleInput(action, 0) },
+        InputAction.page_down => { ptr.handleInput(action, 0) },
+        InputAction.move_word_forward => { ptr.handleInput(action, 0) },
+        InputAction.move_word_backward => { ptr.handleInput(action, 0) },
+        InputAction.move_word_end => { ptr.handleInput(action, 0) },
+        // Select actions
+        InputAction.select_left => { ptr.handleInput(action, 0) },
+        InputAction.select_right => { ptr.handleInput(action, 0) },
+        InputAction.select_up => { ptr.handleInput(action, 0) },
+        InputAction.select_down => { ptr.handleInput(action, 0) },
+        InputAction.select_line_start => { ptr.handleInput(action, 0) },
+        InputAction.select_line_end => { ptr.handleInput(action, 0) },
+        InputAction.select_word_forward => { ptr.handleInput(action, 0) },
+        InputAction.select_word_backward => { ptr.handleInput(action, 0) },
+        InputAction.select_all => { ptr.handleInput(action, 0) },
+        InputAction.add_next_occurrence => { ptr.handleInput(action, 0) },
+        InputAction.collapse_cursors => { ptr.handleInput(action, 0) },
         InputAction.save => {
             g_action_tag = ACTION_MARK_DIRTY
             g_action_surface = surface
@@ -282,27 +282,6 @@ export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
             g_action_tag = ACTION_CLOSE_SURFACE
             g_action_surface = surface
         },
-        InputAction.enter_normal => {
-            ptr.handleInput(InputAction.enter_normal, 0)
-        },
-        InputAction.enter_insert => {
-            ptr.handleInput(InputAction.enter_insert, 0)
-        },
-        InputAction.enter_insert_after => {
-            ptr.handleInput(InputAction.enter_insert_after, 0)
-        },
-        InputAction.enter_select => {
-            ptr.handleInput(InputAction.enter_select, 0)
-        },
-        InputAction.move_word_forward => {
-            ptr.handleInput(InputAction.move_word_forward, 0)
-        },
-        InputAction.move_word_backward => {
-            ptr.handleInput(InputAction.move_word_backward, 0)
-        },
-        InputAction.move_word_end => {
-            ptr.handleInput(InputAction.move_word_end, 0)
-        },
         InputAction.undo => {
             ptr.handleInput(InputAction.undo, 0)
             g_action_tag = ACTION_MARK_DIRTY
@@ -313,7 +292,32 @@ export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
             g_action_tag = ACTION_MARK_DIRTY
             g_action_surface = surface
         },
+        InputAction.delete_selection => {
+            ptr.handleInput(InputAction.delete_selection, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.yank => {
+            ptr.handleInput(InputAction.yank, 0)
+            g_action_tag = ACTION_YANK
+            g_action_surface = surface
+        },
+        InputAction.change_selection => {
+            ptr.handleInput(InputAction.change_selection, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
         else => {},
+    }
+
+    // Re-render editor grid after input
+    if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+        // Auto-rebuild editor debug panel if active
+        if (ptr.inspector.active and ptr.inspector.panel == PANEL_EDITOR) {
+            cotty_inspector_rebuild_editor_state(surface)
+        }
     }
 }
 
@@ -326,6 +330,16 @@ export fn cotty_surface_text(surface: i64, ptr: *u8, len: i64) void {
     }
     g_action_tag = ACTION_MARK_DIRTY
     g_action_surface = surface
+
+    // Re-render editor grid after text input
+    if (sptr.kind == SurfaceKind.Editor and sptr.viewport_rows > 0) {
+        sptr.ensureCursorInView()
+        sptr.renderEditorGrid()
+        // Auto-rebuild editor debug panel if active
+        if (sptr.inspector.active and sptr.inspector.panel == PANEL_EDITOR) {
+            cotty_inspector_rebuild_editor_state(surface)
+        }
+    }
 }
 
 /// Load content into a surface, replacing existing buffer.
@@ -347,6 +361,12 @@ export fn cotty_surface_load_content(surface: i64, ptr: *u8, len: i64) void {
     sptr.cursor = Cursor.init()
     // Ensure Insert mode for editing
     sptr.mode = Mode.Insert
+
+    // Re-render editor grid after content load
+    if (sptr.viewport_rows > 0) {
+        sptr.ensureCursorInView()
+        sptr.renderEditorGrid()
+    }
 }
 
 // ============================================================================
@@ -424,6 +444,209 @@ export fn cotty_surface_set_viewport(surface: i64, rows: i64, cols: i64) void {
 /// Return the current scroll offset.
 export fn cotty_surface_scroll_offset(surface: i64) i64 {
     return getSurfacePtr(surface).scroll_offset
+}
+
+// ============================================================================
+// Editor grid (cell-based rendering)
+// ============================================================================
+
+/// Return a pointer to the editor render grid cells buffer.
+export fn cotty_editor_cells_ptr(surface: i64) i64 {
+    return getSurfacePtr(surface).render_grid.cells.items
+}
+
+/// Return the number of rows in the editor render grid.
+export fn cotty_editor_rows(surface: i64) i64 {
+    return getSurfacePtr(surface).viewport_rows
+}
+
+/// Return the number of columns in the editor render grid.
+export fn cotty_editor_cols(surface: i64) i64 {
+    return getSurfacePtr(surface).viewport_cols
+}
+
+/// Resize the editor render grid and re-render.
+export fn cotty_editor_resize(surface: i64, rows: i64, cols: i64) void {
+    getSurfacePtr(surface).resizeEditorGrid(rows, cols)
+}
+
+/// Set cursor visibility (for blink timer).
+export fn cotty_editor_set_cursor_visible(surface: i64, visible: i64) void {
+    getSurfacePtr(surface).cursor_visible = visible != 0
+}
+
+/// Force a re-render of the editor grid.
+export fn cotty_editor_rebuild(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    if (ptr.viewport_rows > 0 and ptr.viewport_cols > 0) {
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Return the current editor scroll offset (line index).
+export fn cotty_editor_scroll_offset(surface: i64) i64 {
+    return getSurfacePtr(surface).scroll_offset
+}
+
+/// Set the editor scroll offset (from scrollbar), clamped and re-rendered.
+export fn cotty_editor_set_scroll_offset(surface: i64, offset: i64) void {
+    getSurfacePtr(surface).setScrollOffset(offset)
+}
+
+/// Handle vertical scroll wheel input — same pattern as cotty_terminal_scroll.
+export fn cotty_editor_scroll(surface: i64, delta: i64, precise: i64, cell_height: i64) void {
+    getSurfacePtr(surface).scrollEvent(delta, precise, cell_height, g_app.config.scroll_multiplier)
+}
+
+/// Return the current horizontal scroll offset (column index).
+export fn cotty_editor_h_scroll_offset(surface: i64) i64 {
+    return getSurfacePtr(surface).h_scroll_offset
+}
+
+/// Set the horizontal scroll offset (from scrollbar), clamped and re-rendered.
+export fn cotty_editor_set_h_scroll_offset(surface: i64, offset: i64) void {
+    getSurfacePtr(surface).setHScrollOffset(offset)
+}
+
+/// Handle horizontal scroll wheel input.
+export fn cotty_editor_h_scroll(surface: i64, delta: i64, precise: i64, cell_width: i64) void {
+    getSurfacePtr(surface).hScrollEvent(delta, precise, cell_width, g_app.config.scroll_multiplier)
+}
+
+/// Return the length of the longest line in the buffer.
+export fn cotty_editor_max_line_length(surface: i64) i64 {
+    return getSurfacePtr(surface).document.buffer.maxLineLength()
+}
+
+/// Return cursor screen row (cursor line minus scroll offset).
+export fn cotty_editor_cursor_row(surface: i64) i64 {
+    return getSurfacePtr(surface).editorCursorScreenRow()
+}
+
+/// Return cursor screen col (gutter + cursor col minus h_scroll offset).
+export fn cotty_editor_cursor_col(surface: i64) i64 {
+    return getSurfacePtr(surface).editorCursorScreenCol()
+}
+
+/// Handle mouse click in editor — position cursor at screen coordinates.
+export fn cotty_editor_click(surface: i64, row: i64, col: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.editorClick(row, col)
+    // Auto-rebuild editor debug panel if active
+    if (sptr.inspector.active and sptr.inspector.panel == PANEL_EDITOR) {
+        cotty_inspector_rebuild_editor_state(surface)
+    }
+}
+
+/// Handle mouse drag in editor — extend selection to screen coordinates.
+export fn cotty_editor_drag(surface: i64, row: i64, col: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.editorDrag(row, col)
+}
+
+/// Return pointer to yank buffer text.
+export fn cotty_editor_yank_text(surface: i64) i64 {
+    const sptr = getSurfacePtr(surface)
+    if (sptr.yank_buf.count == 0) { return 0 }
+    return sptr.yank_buf.items
+}
+
+/// Return length of yank buffer text.
+export fn cotty_editor_yank_text_len(surface: i64) i64 {
+    return getSurfacePtr(surface).yank_buf.count
+}
+
+/// Copy selection to yank buffer (for Cmd+C).
+export fn cotty_editor_copy(surface: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.yankSelection()
+    g_action_tag = ACTION_YANK
+    g_action_surface = surface
+}
+
+/// Select all text in the editor (for Cmd+A).
+export fn cotty_editor_select_all(surface: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.handleInput(InputAction.select_all, 0)
+    if (sptr.kind == SurfaceKind.Editor and sptr.viewport_rows > 0) {
+        sptr.ensureCursorInView()
+        sptr.renderEditorGrid()
+    }
+}
+
+/// Cut selection — yank then delete (for Cmd+X).
+export fn cotty_editor_cut(surface: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.yankSelection()
+    sptr.deleteSelection()
+    sptr.document.selection = Selection.point(sptr.cursor.offset)
+    g_action_tag = ACTION_YANK
+    g_action_surface = surface
+    // Re-render after cut
+    if (sptr.kind == SurfaceKind.Editor and sptr.viewport_rows > 0) {
+        sptr.ensureCursorInView()
+        sptr.renderEditorGrid()
+    }
+}
+
+/// Smart paste — single-transaction insert with linewise and indent awareness.
+/// If the yank buffer was linewise, paste inserts on a new line.
+/// Adjusts indentation to match cursor context.
+export fn cotty_editor_paste(surface: i64, ptr: *u8, len: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.editorPaste(ptr, len)
+    g_action_tag = ACTION_MARK_DIRTY
+    g_action_surface = surface
+    // Re-render after paste
+    if (sptr.kind == SurfaceKind.Editor and sptr.viewport_rows > 0) {
+        sptr.ensureCursorInView()
+        sptr.renderEditorGrid()
+    }
+}
+
+/// Return 1 if the yank buffer contains linewise content, 0 otherwise.
+export fn cotty_editor_yank_is_linewise(surface: i64) i64 {
+    if (getSurfacePtr(surface).yank_is_linewise) { return 1 }
+    return 0
+}
+
+/// Add a cursor at a click position (Cmd+Click). Row/col are screen coords.
+export fn cotty_editor_add_cursor(surface: i64, row: i64, col: i64) void {
+    const sptr = getSurfacePtr(surface)
+    if (sptr.kind != SurfaceKind.Editor) { return }
+    // Convert screen row/col to byte offset (same as editorClick)
+    const total_lines = sptr.document.buffer.lineCount()
+    const gutter_w = sptr.gutterWidth(total_lines)
+    const doc_col = col - gutter_w + sptr.h_scroll_offset
+    const doc_line = sptr.scroll_offset + row
+    if (doc_line < 0 or doc_line >= total_lines) { return }
+    const line_len = sptr.document.buffer.lineLength(doc_line)
+    var clamped_col = doc_col
+    if (clamped_col < 0) { clamped_col = 0 }
+    if (clamped_col > line_len) { clamped_col = line_len }
+    const offset = sptr.document.buffer.lineStartOffset(doc_line) + clamped_col
+    sptr.addCursorAt(offset)
+    // Re-render
+    if (sptr.viewport_rows > 0) {
+        sptr.renderEditorGrid()
+    }
+}
+
+/// Add next occurrence of selected text (Cmd+D).
+export fn cotty_editor_add_next_occurrence(surface: i64) void {
+    const sptr = getSurfacePtr(surface)
+    if (sptr.kind != SurfaceKind.Editor) { return }
+    sptr.addNextOccurrence()
+    // Re-render
+    if (sptr.viewport_rows > 0) {
+        sptr.ensureCursorInView()
+        sptr.renderEditorGrid()
+    }
+}
+
+/// Return the number of cursors (selection ranges).
+export fn cotty_editor_cursor_count(surface: i64) i64 {
+    return getSurfacePtr(surface).document.selection.ranges.count
 }
 
 // ============================================================================
@@ -911,7 +1134,7 @@ export fn cotty_terminal_mouse_event(surface: i64, button: i64, col: i64, row: i
 /// Swift just forwards raw deltas — no logic in the platform layer.
 export fn cotty_terminal_scroll(surface: i64, delta: i64, precise: i64, cell_height: i64, col: i64, row: i64) void {
     const sptr = getSurfacePtr(surface)
-    sptr.terminal.scrollEvent(sptr.shell.master_fd, delta, precise, cell_height, col, row)
+    sptr.terminal.scrollEvent(sptr.shell.master_fd, delta, precise, cell_height, col, row, g_app.config.scroll_multiplier)
 }
 
 // ============================================================================
@@ -1107,9 +1330,20 @@ export fn cotty_inspector_resize(surface: i64, rows: i64, cols: i64) void {
     getSurfacePtr(surface).inspector.resize(rows, cols)
 }
 
-/// Switch the inspector to a different panel (0=Screen, 1=Modes, 2=Keyboard, 3=Terminal IO).
+/// Switch the inspector to a different panel (0=Screen, 1=Modes, 2=Keyboard, 3=Terminal IO, 4=Editor).
 export fn cotty_inspector_set_panel(surface: i64, panel: i64) void {
-    getSurfacePtr(surface).inspector.setPanel(panel)
+    const sptr = getSurfacePtr(surface)
+    sptr.inspector.setPanel(panel)
+    // Auto-toggle debug logging when switching to/from Panel 4
+    if (panel == PANEL_EDITOR) {
+        g_buffer_debug = true
+        g_changeset_debug = true
+        // Immediately rebuild with current state
+        cotty_inspector_rebuild_editor_state(surface)
+    } else {
+        g_buffer_debug = false
+        g_changeset_debug = false
+    }
 }
 
 /// Scroll the inspector panel.
@@ -1142,6 +1376,80 @@ export fn cotty_inspector_rebuild_terminal_state(surface: i64) void {
     } else if (sptr.inspector.panel == PANEL_MODES) {
         sptr.inspector.rebuildModesFrom(sptr.terminal)
     }
+}
+
+/// Rebuild the Editor Debug panel with current editor state snapshot.
+export fn cotty_inspector_rebuild_editor_state(surface: i64) void {
+    const sptr = getSurfacePtr(surface)
+    if (!sptr.inspector.active) { return }
+    if (sptr.inspector.panel != PANEL_EDITOR) { return }
+    const state = EditorDebugState {
+        buf_len: sptr.document.buffer.len(),
+        gap_start: sptr.document.buffer.gap_start,
+        gap_end: sptr.document.buffer.gap_end,
+        data_count: sptr.document.buffer.data.count,
+        gap_size: sptr.document.buffer.gapSize(),
+        line_count: sptr.document.buffer.lineCount(),
+        cursor_line: sptr.cursor.line,
+        cursor_col: sptr.cursor.col,
+        cursor_offset: sptr.cursor.offset,
+        cursor_goal_col: sptr.cursor.goal_col,
+        selection_count: sptr.document.selection.ranges.count,
+        primary_index: sptr.document.selection.primary_index,
+        revision_count: sptr.document.history.revisions.count,
+        history_current: sptr.document.history.current,
+        at_root: sptr.document.history.atRoot(),
+        can_redo: sptr.document.history.canRedo(),
+        valid: sptr.document.buffer.validate(),
+    }
+    sptr.inspector.rebuildEditorState(state)
+}
+
+// ============================================================================
+// Debug toggles
+// ============================================================================
+
+/// Enable/disable buffer validation after every mutation.
+export fn cotty_debug_enable_buffer_validation(enable: i64) void {
+    g_buffer_debug = enable != 0
+}
+
+/// Enable/disable changeset operation logging.
+export fn cotty_debug_enable_changeset_logging(enable: i64) void {
+    g_changeset_debug = enable != 0
+}
+
+// ============================================================================
+// Debug buffer state queries
+// ============================================================================
+
+export fn cotty_debug_buffer_gap_start(surface: i64) i64 {
+    return getSurfacePtr(surface).document.buffer.gap_start
+}
+
+export fn cotty_debug_buffer_gap_end(surface: i64) i64 {
+    return getSurfacePtr(surface).document.buffer.gap_end
+}
+
+export fn cotty_debug_buffer_data_count(surface: i64) i64 {
+    return getSurfacePtr(surface).document.buffer.data.count
+}
+
+export fn cotty_debug_buffer_validate(surface: i64) i64 {
+    if (getSurfacePtr(surface).document.buffer.validate()) { return 1 }
+    return 0
+}
+
+// ============================================================================
+// Debug history queries
+// ============================================================================
+
+export fn cotty_debug_history_revision_count(surface: i64) i64 {
+    return getSurfacePtr(surface).document.history.revisions.count
+}
+
+export fn cotty_debug_history_current(surface: i64) i64 {
+    return getSurfacePtr(surface).document.history.current
 }
 
 // ============================================================================
@@ -1326,6 +1634,12 @@ export fn cotty_workspace_preview_tab_index(ws: i64) i64 {
 }
 
 // ---- Workspace state ----
+
+/// Toggle sidebar visibility. Returns 1 if now visible, 0 if hidden.
+export fn cotty_workspace_toggle_sidebar(ws: i64) i64 {
+    if (getWorkspacePtr(ws).toggleSidebar()) { return 1 }
+    return 0
+}
 
 /// Return 1 if the sidebar is visible, 0 otherwise.
 export fn cotty_workspace_sidebar_visible(ws: i64) i64 {

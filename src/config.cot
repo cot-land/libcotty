@@ -54,6 +54,7 @@ struct Config {
     shell_command: string,
     background_opacity: i64,
     option_as_alt: i64,  // 0=false (macOS composed chars), 1=true (ESC prefix)
+    scroll_multiplier: i64,  // Discrete scroll multiplier (default 3, Ghostty convention)
 
     /// Create a Config with Monokai Remastered defaults.
     static fn init() Config {
@@ -75,6 +76,7 @@ struct Config {
             shell_command: "/bin/zsh",
             background_opacity: 100,
             option_as_alt: 1,  // default: option=alt (terminal convention)
+            scroll_multiplier: 3,  // Ghostty default for discrete mouse wheel
         }
     }
 
@@ -142,6 +144,15 @@ struct Config {
             } else if (jsonTag(opt_alt_val) == JSON_INT) {
                 cfg.option_as_alt = jsonGetInt(opt_alt_val)
             }
+        }
+
+        // Scroll multiplier (discrete mouse wheel, default 3)
+        const scroll_val = jsonObjectGet(root, "mouse-scroll-multiplier")
+        if (scroll_val != 0 and jsonTag(scroll_val) == JSON_INT) {
+            var mult = jsonGetInt(scroll_val)
+            if (mult < 1) { mult = 1 }
+            if (mult > 20) { mult = 20 }
+            cfg.scroll_multiplier = mult
         }
 
         // Colors

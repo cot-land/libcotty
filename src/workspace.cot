@@ -253,6 +253,12 @@ struct Workspace {
         }
     }
 
+    /// Toggle sidebar visibility. Returns new state.
+    fn toggleSidebar() bool {
+        self.sidebar_visible = !self.sidebar_visible
+        return self.sidebar_visible
+    }
+
     /// Set sidebar visibility.
     fn setSidebarVisible(v: bool) void {
         self.sidebar_visible = v

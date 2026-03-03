@@ -369,14 +369,21 @@ loop {
 | Gap buffer | `buffer.cot` |
 | Cursor | `cursor.cot` |
 
+### Completed
+
+| Component | Cotty File | Notes |
+|---|---|---|
+| **Selection model** (anchor-head, multi-cursor) | `src/selection.cot` | Range, Selection, normalize, map through edits |
+| **Transaction system** (retain/delete/insert ops) | `src/transaction.cot` | Operation, ChangeSet, compose, invert, apply |
+| **History** (undo/redo with inversion) | `src/history.cot` | Linear stack with redo branch, cursor restore |
+| **Document** (buffer + selection + history) | `src/document.cot` | Buffer + History + Selection + filepath + dirty |
+| **Mode system** (Normal/Insert/Select) | `src/input.cot` + `src/surface.cot` | Mode enum, keyToActionInMode, vim-style Normal mode |
+| **Word movement** (w/b/e) | `src/surface.cot` | charCategory, moveWordForward/Backward/End |
+
 ### What Needs Building
 
 | Component | Helix Ref | Priority | Effort |
 |---|---|---|---|
-| **Selection model** (anchor-head, multi-cursor) | `selection.rs` | P0 | Medium |
-| **Transaction system** (retain/delete/insert ops) | `transaction.rs` | P0 | Medium |
-| **History** (undo/redo with inversion) | `history.rs` | P0 | Small |
-| **Document** (buffer + selections + syntax + history) | `document.rs` | P0 | Large |
 | **View** (viewport, scrolling, coord transforms) | `view.rs` | P0 | Medium |
 | **Editor state** (mode, registers, documents, focus) | `editor.rs` | P0 | Large |
 | **Compositor** (layered components, event propagation) | `compositor.rs` | P1 | Medium |
@@ -401,18 +408,21 @@ The editor renders to the **same cell grid** as the terminal. An editor surface 
 
 Metal renderer already handles all of this — it's just cells with colors and attributes.
 
-### File Organization (Proposed)
+### File Organization
+
+Files are flat in `src/` (no subdirectory):
 
 ```
 libcotty/src/
-  editor/
-    selection.cot     # Range, Selection (port of selection.rs)
-    transaction.cot   # Operation, ChangeSet, Transaction (port of transaction.rs)
-    history.cot       # History, Revision (port of history.rs)
-    document.cot      # Document (buffer + selections + syntax + history)
-    view.cot          # View (viewport, scrolling, coord transforms)
-    editor.cot        # Editor (top-level state, mode, registers)
-    keymap.cot        # Modal input handling
-    commands.cot      # Editor commands (movement, edit, etc.)
-    render.cot        # Editor → cell grid rendering
+  selection.cot     # Range, Selection (port of selection.rs)        ✓ done
+  transaction.cot   # Operation, ChangeSet, Transaction              ✓ done
+  history.cot       # History, Revision (port of history.rs)         ✓ done
+  document.cot      # Document (buffer + selection + history)        ✓ done
+  input.cot         # Mode enum, keyToActionInMode, InputAction      ✓ done
+  surface.cot       # Editor surface, mode dispatch, word movement   ✓ done
+  view.cot          # View (viewport, scrolling, coord transforms)   TODO
+  editor.cot        # Editor (top-level state, mode, registers)      TODO
+  keymap.cot        # Modal input handling                           TODO
+  commands.cot      # Editor commands (movement, edit, etc.)         TODO
+  render.cot        # Editor → cell grid rendering                   TODO
 ```
