@@ -505,6 +505,31 @@ struct Surface {
             InputAction.move_word_forward => { self.moveAllCursors(InputAction.move_word_forward) },
             InputAction.move_word_backward => { self.moveAllCursors(InputAction.move_word_backward) },
             InputAction.move_word_end => { self.moveAllCursors(InputAction.move_word_forward) },
+            InputAction.move_doc_start => { self.moveAllCursors(InputAction.move_doc_start) },
+            InputAction.move_doc_end => { self.moveAllCursors(InputAction.move_doc_end) },
+            InputAction.select_doc_start => { self.extendAllSelections(InputAction.move_doc_start) },
+            InputAction.select_doc_end => { self.extendAllSelections(InputAction.move_doc_end) },
+            InputAction.select_to_line_start => { self.extendAllSelections(InputAction.move_line_start) },
+            InputAction.select_to_line_end => { self.extendAllSelections(InputAction.move_line_end) },
+            InputAction.delete_to_line_start => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 2
+                // Delete from cursor to start of line
+                const line_start = self.moveOffsetLineStart(self.cursor.offset)
+                if (line_start < self.cursor.offset) {
+                    var cs = ChangeSet.init()
+                    if (line_start > 0) { cs.retain(line_start) }
+                    cs.delete(self.cursor.offset - line_start)
+                    const rest = self.document.buffer.len() - self.cursor.offset
+                    if (rest > 0) { cs.retain(rest) }
+                    var txn = Transaction { changes: cs }
+                    self.document.apply(txn, self.cursor.offset, line_start)
+                    self.cursor.offset = line_start
+                    self.recomputeLineCol()
+                    self.document.selection = Selection.point(self.cursor.offset)
+                }
+            },
             InputAction.add_next_occurrence => {
                 self.addNextOccurrence()
             },
@@ -579,6 +604,16 @@ struct Surface {
     fn moveOffsetLineEnd(offset: int) int {
         const line = self.offsetToLine(offset)
         return self.document.buffer.lineStartOffset(line) + self.document.buffer.lineLength(line)
+    }
+
+    /// Move to start of document.
+    fn moveOffsetDocStart(offset: int) int {
+        return 0
+    }
+
+    /// Move to end of document.
+    fn moveOffsetDocEnd(offset: int) int {
+        return self.document.buffer.len()
     }
 
     /// Move a byte offset forward by one word (inline charCategory to avoid compiler bug).
@@ -679,6 +714,8 @@ struct Surface {
                 InputAction.move_line_end => { new_head = self.moveOffsetLineEnd(head) },
                 InputAction.move_word_forward => { new_head = self.moveOffsetWordForward(head) },
                 InputAction.move_word_backward => { new_head = self.moveOffsetWordBackward(head) },
+                InputAction.move_doc_start => { new_head = self.moveOffsetDocStart(head) },
+                InputAction.move_doc_end => { new_head = self.moveOffsetDocEnd(head) },
                 else => {},
             }
             self.document.selection.replace(i, Range { anchor: new_head, head: new_head })
@@ -713,6 +750,8 @@ struct Surface {
                 InputAction.move_line_end => { new_head = self.moveOffsetLineEnd(head) },
                 InputAction.move_word_forward => { new_head = self.moveOffsetWordForward(head) },
                 InputAction.move_word_backward => { new_head = self.moveOffsetWordBackward(head) },
+                InputAction.move_doc_start => { new_head = self.moveOffsetDocStart(head) },
+                InputAction.move_doc_end => { new_head = self.moveOffsetDocEnd(head) },
                 else => {},
             }
             self.document.selection.replace(i, Range { anchor: anchor, head: new_head })
