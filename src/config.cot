@@ -55,6 +55,9 @@ struct Config {
     background_opacity: i64,
     option_as_alt: i64,  // 0=false (macOS composed chars), 1=true (ESC prefix)
     scroll_multiplier: i64,  // Discrete scroll multiplier (default 3, Ghostty convention)
+    cursor_style_terminal: i64,  // 0=block (default), 1=bar, 2=underline
+    cursor_style_editor: i64,    // 0=block, 1=bar (default), 2=underline
+    inspector_font_size: i64,    // 0=auto (font_size - 4, min 10), >0 = explicit size
 
     /// Create a Config with Monokai Remastered defaults.
     static fn init() Config {
@@ -77,6 +80,9 @@ struct Config {
             background_opacity: 100,
             option_as_alt: 1,  // default: option=alt (terminal convention)
             scroll_multiplier: 3,  // Ghostty default for discrete mouse wheel
+            cursor_style_terminal: 0,  // block
+            cursor_style_editor: 1,    // bar
+            inspector_font_size: 0,    // auto
         }
     }
 
@@ -155,6 +161,20 @@ struct Config {
             cfg.scroll_multiplier = mult
         }
 
+        // Cursor styles
+        const cursor_term_val = jsonObjectGet(root, "cursor-style-terminal")
+        if (cursor_term_val != 0 and jsonTag(cursor_term_val) == JSON_STRING) {
+            cfg.cursor_style_terminal = parseCursorStyle(jsonGetString(cursor_term_val))
+        }
+        const cursor_edit_val = jsonObjectGet(root, "cursor-style-editor")
+        if (cursor_edit_val != 0 and jsonTag(cursor_edit_val) == JSON_STRING) {
+            cfg.cursor_style_editor = parseCursorStyle(jsonGetString(cursor_edit_val))
+        }
+        const insp_font_val = jsonObjectGet(root, "inspector-font-size")
+        if (insp_font_val != 0 and jsonTag(insp_font_val) == JSON_INT) {
+            cfg.inspector_font_size = jsonGetInt(insp_font_val)
+        }
+
         // Colors
         const bg_val = jsonObjectGet(root, "background")
         if (bg_val != 0 and jsonTag(bg_val) == JSON_STRING) {
@@ -226,6 +246,20 @@ struct Config {
 // ============================================================================
 // Hex Color Parsing
 // ============================================================================
+
+/// Parse cursor style string to i64: "block"→0, "bar"→1, "underline"→2.
+fn parseCursorStyle(s: string) i64 {
+    if (s.len >= 3 and s[0] == 'b' and s[1] == 'a' and s[2] == 'r') { return 1 }
+    if (s.len >= 9 and s[0] == 'u') { return 2 }  // "underline"
+    return 0  // "block" or unknown → default block
+}
+
+/// Convert cursor style i64 to string name.
+fn cursorStyleName(style: i64) string {
+    if (style == 1) { return "bar" }
+    if (style == 2) { return "underline" }
+    return "block"
+}
 
 /// Parse a "#RRGGBB" hex color string into (r, g, b) components.
 fn parseHexColor(s: string) (i64, i64, i64) {
@@ -400,6 +434,19 @@ fn saveToFile(cfg: *Config, path: string) void {
     sb.append("  \"selection-foreground\": ")
     appendHexColor(sb, cfg.sel_fg_r, cfg.sel_fg_g, cfg.sel_fg_b)
     sb.append(",\n")
+
+    // Cursor styles
+    sb.append("  \"cursor-style-terminal\": \"")
+    sb.append(cursorStyleName(cfg.cursor_style_terminal))
+    sb.append("\",\n")
+    sb.append("  \"cursor-style-editor\": \"")
+    sb.append(cursorStyleName(cfg.cursor_style_editor))
+    sb.append("\",\n")
+    if (cfg.inspector_font_size > 0) {
+        sb.append("  \"inspector-font-size\": ")
+        sb.appendInt(cfg.inspector_font_size)
+        sb.append(",\n")
+    }
 
     // Palette array (16 hex color strings)
     sb.append("  \"palette\": [\n")

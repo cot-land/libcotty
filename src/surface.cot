@@ -1264,7 +1264,7 @@ struct Surface {
         }
     }
 
-    /// Compute gutter width (digits + 1 space padding + 1 separator).
+    /// Compute gutter width (digits + 1 space padding + 1 gap + 1 separator).
     fn gutterWidth(total_lines: i64) i64 {
         var digits: i64 = 1
         var n = total_lines
@@ -1272,8 +1272,8 @@ struct Surface {
             n = n / 10
             digits += 1
         }
-        const width = digits + 2
-        if (width < 4) { return 4 }
+        const width = digits + 3
+        if (width < 5) { return 5 }
         return width
     }
 

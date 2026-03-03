@@ -1100,6 +1100,24 @@ export fn cotty_config_reload() void {
     initThemeDefaults(&g_app.config)
 }
 
+export fn cotty_config_cursor_style_terminal() i64 {
+    return g_app.config.cursor_style_terminal
+}
+
+export fn cotty_config_cursor_style_editor() i64 {
+    return g_app.config.cursor_style_editor
+}
+
+export fn cotty_config_inspector_font_size() i64 {
+    return g_app.config.inspector_font_size
+}
+
+/// Save current config to disk (~/.config/cotty/config.json).
+export fn cotty_config_save() void {
+    const path = configPath()
+    saveToFile(g_app.config, path)
+}
+
 // ============================================================================
 // Mouse tracking
 // ============================================================================
