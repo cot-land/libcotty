@@ -538,6 +538,24 @@ export fn cotty_editor_click(surface: i64, row: i64, col: i64) void {
     }
 }
 
+/// Handle double-click in editor — select word at screen coordinates.
+export fn cotty_editor_select_word(surface: i64, row: i64, col: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.editorSelectWord(row, col)
+    if (sptr.inspector.active and sptr.inspector.panel == PANEL_EDITOR) {
+        cotty_inspector_rebuild_editor_state(surface)
+    }
+}
+
+/// Handle triple-click in editor — select line at screen row.
+export fn cotty_editor_select_line(surface: i64, row: i64) void {
+    const sptr = getSurfacePtr(surface)
+    sptr.editorSelectLine(row)
+    if (sptr.inspector.active and sptr.inspector.panel == PANEL_EDITOR) {
+        cotty_inspector_rebuild_editor_state(surface)
+    }
+}
+
 /// Handle mouse drag in editor — extend selection to screen coordinates.
 export fn cotty_editor_drag(surface: i64, row: i64, col: i64) void {
     const sptr = getSurfacePtr(surface)

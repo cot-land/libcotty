@@ -1557,6 +1557,90 @@ struct Surface {
         self.renderEditorGrid()
     }
 
+    /// Handle double-click — select the word under the cursor.
+    /// Uses charCategory from movement.cot for consistent word boundaries.
+    fn editorSelectWord(screen_row: i64, screen_col: i64) void {
+        self.document.history.breakGroup()
+        self.last_edit_kind = 0
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        if (screen_col < gutter_w) { return }
+        const doc_col = screen_col - gutter_w + self.h_scroll_offset
+        const doc_line = screen_row + self.scroll_offset
+        if (doc_line < 0) { return }
+        var target_line = doc_line
+        if (target_line >= total_lines) { target_line = total_lines - 1 }
+        if (target_line < 0) { target_line = 0 }
+        const line_len = self.document.buffer.lineLength(target_line)
+        var target_col = doc_col
+        if (target_col >= line_len) { target_col = line_len - 1 }
+        if (target_col < 0) { target_col = 0 }
+        if (line_len == 0) {
+            // Empty line — just position cursor
+            self.cursor.line = target_line
+            self.cursor.col = 0
+            self.recomputeOffset()
+            self.document.selection = Selection.point(self.cursor.offset)
+            self.renderEditorGrid()
+            return
+        }
+
+        const line_start = self.document.buffer.lineStartOffset(target_line)
+        const click_offset = line_start + target_col
+        const click_ch = self.document.buffer.charAt(click_offset)
+        const click_cat = charCategory(click_ch)
+
+        // Expand left within line
+        var left_col = target_col
+        while (left_col > 0) {
+            const prev_ch = self.document.buffer.charAt(line_start + left_col - 1)
+            if (charCategory(prev_ch) != click_cat) { break }
+            left_col -= 1
+        }
+
+        // Expand right within line
+        var right_col = target_col + 1
+        while (right_col < line_len) {
+            const next_ch = self.document.buffer.charAt(line_start + right_col)
+            if (charCategory(next_ch) != click_cat) { break }
+            right_col += 1
+        }
+
+        const anchor = line_start + left_col
+        const head = line_start + right_col
+        self.cursor.line = target_line
+        self.cursor.col = right_col
+        self.cursor.offset = head
+        self.document.selection = Selection.init(anchor, head)
+        self.renderEditorGrid()
+    }
+
+    /// Handle triple-click — select the entire line.
+    fn editorSelectLine(screen_row: i64) void {
+        self.document.history.breakGroup()
+        self.last_edit_kind = 0
+        const total_lines = self.document.buffer.lineCount()
+        const doc_line = screen_row + self.scroll_offset
+        if (doc_line < 0) { return }
+        var target_line = doc_line
+        if (target_line >= total_lines) { target_line = total_lines - 1 }
+        if (target_line < 0) { target_line = 0 }
+
+        const line_start = self.document.buffer.lineStartOffset(target_line)
+        const line_len = self.document.buffer.lineLength(target_line)
+        // Select through end of line including newline if present
+        var line_end = line_start + line_len
+        if (target_line < total_lines - 1) {
+            line_end += 1  // include newline
+        }
+
+        self.cursor.line = target_line
+        self.cursor.col = line_len
+        self.cursor.offset = line_end
+        self.document.selection = Selection.init(line_start, line_end)
+        self.renderEditorGrid()
+    }
+
     /// Handle mouse drag — extend selection from click anchor to current position.
     fn editorDrag(screen_row: i64, screen_col: i64) void {
         const total_lines = self.document.buffer.lineCount()
