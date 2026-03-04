@@ -2,8 +2,8 @@
 /// Wraps the C shim (libtreesitter_shim.dylib) for markdown highlighting.
 /// Maps tree-sitter capture names to existing token types from syntax.cot.
 ///
-/// Global state: one shared markdown context + per-byte token array.
-/// The token array is rebuilt each frame from the full document text.
+/// Global state: one shared markdown context + per-capture LUTs.
+/// Per-surface token arrays live on Surface.hl_tokens, rebuilt each frame.
 
 import "std/sys"
 import "std/string"
@@ -34,7 +34,6 @@ extern fn cotty_ts_destroy(ctx: i64) void
 var g_ts_md_ctx: i64 = 0         // markdown tree-sitter context (0 = not initialized)
 var g_ts_block_lut: List(i64) = undefined   // block capture index → token type
 var g_ts_inline_lut: List(i64) = undefined  // inline capture index → token type
-var g_ts_tokens: List(i64) = undefined      // per-byte-offset token types (rebuilt each frame)
 var g_ts_initialized: bool = false
 
 // ============================================================================
@@ -65,10 +64,8 @@ fn tsInitMarkdown() void {
     g_ts_initialized = true
     var bl: List(i64) = .{}
     var il: List(i64) = .{}
-    var tk: List(i64) = .{}
     g_ts_block_lut = bl
     g_ts_inline_lut = il
-    g_ts_tokens = tk
     g_ts_md_ctx = cotty_ts_init_markdown()
     if (g_ts_md_ctx != 0) {
         buildCaptureLut(g_ts_md_ctx, 0, &g_ts_block_lut)
@@ -94,14 +91,14 @@ fn buildCaptureLut(ctx: i64, is_inline: i64, out: *List(i64)) void {
     }
 }
 
-/// Rebuild the global per-byte token array from tree-sitter.
+/// Rebuild the per-byte token array from tree-sitter.
 /// Call this once per frame before rendering.
-fn tsRebuildHighlights(text: string) void {
+fn tsRebuildHighlights(text: string, tokens: *List(i64)) void {
     // Clear and initialize all bytes to TOK_DEFAULT
-    g_ts_tokens.count = 0
+    tokens.count = 0
     var b: i64 = 0
     while (b < text.len) {
-        g_ts_tokens.append(TOK_DEFAULT)
+        tokens.append(TOK_DEFAULT)
         b += 1
     }
 
@@ -129,7 +126,7 @@ fn tsRebuildHighlights(text: string) void {
         if (tok != TOK_DEFAULT) {
             var off = start
             while (off < end and off < text.len) {
-                g_ts_tokens.set(off, tok)
+                tokens.set(off, tok)
                 off += 1
             }
         }
@@ -141,9 +138,9 @@ fn tsRebuildHighlights(text: string) void {
 }
 
 /// Get the token type for a given byte offset. Returns TOK_DEFAULT if no highlighting.
-fn tsTokenAt(byte_offset: i64) i64 {
-    if (byte_offset < g_ts_tokens.count) {
-        return g_ts_tokens.get(byte_offset)
+fn tsTokenAt(tokens: *List(i64), byte_offset: i64) i64 {
+    if (byte_offset < tokens.count) {
+        return tokens.get(byte_offset)
     }
     return TOK_DEFAULT
 }

@@ -144,6 +144,7 @@ struct Surface {
     wrap_counts: List(i64),    // display rows per logical line (soft wrap)
     wrap_cum_rows: List(i64),  // prefix sum: first display row of each logical line
     wrap_total_rows: i64,      // total display rows across all lines
+    hl_tokens: List(i64),      // per-byte-offset token types (tree-sitter, rebuilt each frame)
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
     static fn init() *Surface {
@@ -154,6 +155,7 @@ struct Surface {
         var yank: List(u8) = .{}
         var wc: List(i64) = .{}
         var wcr: List(i64) = .{}
+        var hlt: List(i64) = .{}
 
         return new Surface {
             kind: SurfaceKind.Editor,
@@ -186,8 +188,7 @@ struct Surface {
             wrap_counts: wc,
             wrap_cum_rows: wcr,
             wrap_total_rows: 0,
-
-
+            hl_tokens: hlt,
         }
     }
 
@@ -203,6 +204,7 @@ struct Surface {
             var yank2: List(u8) = .{}
             var wc2: List(i64) = .{}
             var wcr2: List(i64) = .{}
+            var hlt2: List(i64) = .{}
 
             var s = new Surface {
                 kind: SurfaceKind.Editor,
@@ -235,8 +237,7 @@ struct Surface {
                 wrap_counts: wc2,
                 wrap_cum_rows: wcr2,
                 wrap_total_rows: 0,
-    
-
+                hl_tokens: hlt2,
             }
             s.document.filepath = path
 
@@ -245,6 +246,7 @@ struct Surface {
 
         var wc3: List(i64) = .{}
         var wcr3: List(i64) = .{}
+        var hlt3: List(i64) = .{}
 
         var s = new Surface {
             kind: SurfaceKind.Editor,
@@ -277,11 +279,9 @@ struct Surface {
             wrap_counts: wc3,
             wrap_cum_rows: wcr3,
             wrap_total_rows: 0,
-
-
+            hl_tokens: hlt3,
         }
         s.document.filepath = path
-        // s.initTreeSitter(path)
         return s
     }
 
@@ -306,7 +306,7 @@ struct Surface {
         var yank: List(u8) = .{}
         var wc4: List(i64) = .{}
         var wcr4: List(i64) = .{}
-
+        var hlt4: List(i64) = .{}
 
         return new Surface {
             kind: SurfaceKind.Terminal,
@@ -339,8 +339,7 @@ struct Surface {
             wrap_counts: wc4,
             wrap_cum_rows: wcr4,
             wrap_total_rows: 0,
-
-
+            hl_tokens: hlt4,
         }
     }
 
@@ -1868,7 +1867,7 @@ struct Surface {
         // Rebuild tree-sitter highlights (Phase 1: full text each frame)
         if (self.hasTreeSitter()) {
             const text = self.document.buffer.toString()
-            tsRebuildHighlights(text)
+            tsRebuildHighlights(text, &self.hl_tokens)
         }
 
         // Search overlay at top of grid
@@ -1955,7 +1954,7 @@ struct Surface {
                 // Look up syntax token color
                 var fg = packRgb(THEME_FG_R, THEME_FG_G, THEME_FG_B)
                 if (has_hl) {
-                    const tok = tsTokenAt(byte_offset)
+                    const tok = tsTokenAt(&self.hl_tokens, byte_offset)
                     const tok_color = tokenColor(tok)
                     if (tok_color != 0) {
                         fg = tok_color

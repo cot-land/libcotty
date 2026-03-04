@@ -3,5 +3,6 @@
   "version": "0.1.0",
   "safe": true,
   "libs": ["treesitter_shim"],
-  "c_flags": ["-Lvendor", "-Wl,-rpath,/Users/johnc/cot-land/cotty/libcotty/vendor"]
+  "c_flags": ["-Lvendor"],
+  "rpath": ["vendor"]
 }

@@ -1468,7 +1468,7 @@ export fn cotty_inspector_rebuild_editor_state(surface: i64) void {
         valid: sptr.document.buffer.validate(),
         ts_initialized: g_ts_initialized,
         ts_ctx: g_ts_md_ctx,
-        ts_token_count: g_ts_tokens.count,
+        ts_token_count: sptr.hl_tokens.count,
         ts_has_filepath: has_fp,
         ts_ends_with_md: ew_md,
         ts_has_treesitter: sptr.hasTreeSitter(),
