@@ -139,6 +139,9 @@ struct Surface {
     scroll_anchor: int,   // byte offset of first visible line (Zed: ScrollAnchor)
     yank_is_linewise: bool,  // true if yank buffer represents full lines (Zed: clipboard_kind)
     search: *SearchState,  // Find & replace overlay (Zed: BufferSearchBar)
+    wrap_counts: List(i64),    // display rows per logical line (soft wrap)
+    wrap_cum_rows: List(i64),  // prefix sum: first display row of each logical line
+    wrap_total_rows: i64,      // total display rows across all lines
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
     static fn init() *Surface {
@@ -147,6 +150,8 @@ struct Surface {
         var dummy_thread: Thread = undefined
         dummy_thread.handle = 0
         var yank: List(u8) = .{}
+        var wc: List(i64) = .{}
+        var wcr: List(i64) = .{}
         return new Surface {
             kind: SurfaceKind.Editor,
             document: Document.init(),
@@ -175,6 +180,9 @@ struct Surface {
             scroll_anchor: 0,
             yank_is_linewise: false,
             search: SearchState.init(),
+            wrap_counts: wc,
+            wrap_cum_rows: wcr,
+            wrap_total_rows: 0,
         }
     }
 
@@ -188,6 +196,8 @@ struct Surface {
         const content = readFile(path) catch {
             // File doesn't exist yet — create empty surface with path
             var yank2: List(u8) = .{}
+            var wc2: List(i64) = .{}
+            var wcr2: List(i64) = .{}
             var s = new Surface {
                 kind: SurfaceKind.Editor,
                 document: Document.init(),
@@ -216,11 +226,16 @@ struct Surface {
                 scroll_anchor: 0,
                 yank_is_linewise: false,
                 search: SearchState.init(),
+                wrap_counts: wc2,
+                wrap_cum_rows: wcr2,
+                wrap_total_rows: 0,
             }
             s.document.filepath = path
             return s
         }
 
+        var wc3: List(i64) = .{}
+        var wcr3: List(i64) = .{}
         var s = new Surface {
             kind: SurfaceKind.Editor,
             document: Document.initWithContent(content),
@@ -249,6 +264,9 @@ struct Surface {
             scroll_anchor: 0,
             yank_is_linewise: false,
             search: SearchState.init(),
+            wrap_counts: wc3,
+            wrap_cum_rows: wcr3,
+            wrap_total_rows: 0,
         }
         s.document.filepath = path
         return s
@@ -273,6 +291,8 @@ struct Surface {
         var dummy_thread: Thread = undefined
         dummy_thread.handle = 0
         var yank: List(u8) = .{}
+        var wc4: List(i64) = .{}
+        var wcr4: List(i64) = .{}
 
         return new Surface {
             kind: SurfaceKind.Terminal,
@@ -302,6 +322,9 @@ struct Surface {
             scroll_anchor: 0,
             yank_is_linewise: false,
             search: SearchState.init(),
+            wrap_counts: wc4,
+            wrap_cum_rows: wcr4,
+            wrap_total_rows: 0,
         }
     }
 
@@ -1199,8 +1222,13 @@ struct Surface {
         self.document.apply(txn, cursor_before, cursor_after)
         // Map scroll anchor through the changeset (ASSOC_BEFORE: stay at same visual position)
         self.scroll_anchor = txn.mapPos(self.scroll_anchor, ASSOC_BEFORE)
-        // Recompute scroll_offset from the mapped anchor
-        self.scroll_offset = self.document.buffer.lineFromOffset(self.scroll_anchor)
+        // Rebuild wrap map and convert anchor → display row
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        const content_cols = self.viewport_cols - gutter_w
+        self.rebuildWrapMap(content_cols)
+        const anchor_line = self.document.buffer.lineFromOffset(self.scroll_anchor)
+        self.scroll_offset = self.wrapLineToDisplayRow(anchor_line)
     }
 
     // ========================================================================
@@ -1499,36 +1527,29 @@ struct Surface {
     }
 
     /// Scroll to keep cursor visible, with scrolloff margin.
+    /// Uses display rows for soft-wrapped content.
     fn ensureCursorInView() void {
         const scrolloff: i64 = 5
         const content_rows = self.viewport_rows - self.search.overlayRows()
         if (content_rows <= 0) { return }
-        if (self.cursor.line < self.scroll_offset + scrolloff) {
-            self.scroll_offset = self.cursor.line - scrolloff
-            if (self.scroll_offset < 0) { self.scroll_offset = 0 }
-        }
-        if (self.cursor.line >= self.scroll_offset + content_rows - scrolloff) {
-            self.scroll_offset = self.cursor.line - content_rows + scrolloff + 1
-        }
-        // Sync scroll anchor with new scroll_offset
-        self.scroll_anchor = self.document.buffer.lineStartOffset(self.scroll_offset)
-        self.ensureCursorHInView()
-    }
-
-    /// Horizontal scroll to keep cursor visible, with scrolloff margin.
-    fn ensureCursorHInView() void {
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
         const content_cols = self.viewport_cols - gutter_w
-        if (content_cols <= 0) { return }
-        const scrolloff: i64 = 5
-        if (self.cursor.col < self.h_scroll_offset + scrolloff) {
-            self.h_scroll_offset = self.cursor.col - scrolloff
-            if (self.h_scroll_offset < 0) { self.h_scroll_offset = 0 }
+        // Rebuild wrap map to get current display row mapping
+        self.rebuildWrapMap(content_cols)
+        const cursor_dr = self.wrapBufToDisplayRow(self.cursor.line, self.cursor.col, content_cols)
+        if (cursor_dr < self.scroll_offset + scrolloff) {
+            self.scroll_offset = cursor_dr - scrolloff
+            if (self.scroll_offset < 0) { self.scroll_offset = 0 }
         }
-        if (self.cursor.col >= self.h_scroll_offset + content_cols - scrolloff) {
-            self.h_scroll_offset = self.cursor.col - content_cols + scrolloff + 1
+        if (cursor_dr >= self.scroll_offset + content_rows - scrolloff) {
+            self.scroll_offset = cursor_dr - content_rows + scrolloff + 1
         }
+        // Sync scroll anchor from display row
+        const anchor_line = self.wrapDisplayRowToLine(self.scroll_offset)
+        self.scroll_anchor = self.document.buffer.lineStartOffset(anchor_line)
+        // No horizontal scroll with soft wrapping
+        self.h_scroll_offset = 0
     }
 
     /// Compute gutter width (digits + 1 space padding + 1 gap + 1 separator).
@@ -1641,39 +1662,45 @@ struct Surface {
     }
 
     /// Mark cells that fall within search matches with CELL_SEARCH_MATCH flag.
-    /// The current match gets both CELL_SEARCH_MATCH and CELL_SELECTED for brighter highlight.
+    /// Uses display coordinates for soft-wrapped rendering.
     fn renderSearchMatches(gutter_w: i64, row_offset: i64, content_rows: i64) void {
+        const content_cols = self.viewport_cols - gutter_w
+        if (content_cols <= 0) { return }
         var mi: i64 = 0
         while (mi < self.search.matches.count) {
             const m = self.search.matches.get(mi)
             const is_current = (mi == self.search.current_match)
-            // Convert match start/end to lines
             const from_line = self.offsetToLine(m.start)
-            const to_line = self.offsetToLine(m.end - 1)  // end is exclusive
-            var line = from_line
-            while (line <= to_line) {
-                const screen_row = line - self.scroll_offset + row_offset
-                if (screen_row < row_offset) { line += 1; continue }
+            const from_col = m.start - self.document.buffer.lineStartOffset(from_line)
+            const to_line = self.offsetToLine(m.end - 1)
+            const to_col = m.end - self.document.buffer.lineStartOffset(to_line)
+            // Iterate display rows spanned by match
+            const from_dr = self.wrapBufToDisplayRow(from_line, from_col, content_cols)
+            const to_dr = self.wrapBufToDisplayRow(to_line, to_col - 1, content_cols)
+            var dr = from_dr
+            while (dr <= to_dr) {
+                const screen_row = dr - self.scroll_offset + row_offset
+                if (screen_row < row_offset) { dr += 1; continue }
                 if (screen_row >= self.viewport_rows) { break }
-                const line_start = self.document.buffer.lineStartOffset(line)
-                const line_len = self.document.buffer.lineLength(line)
-                // Determine char range within this line
-                var start_col: i64 = 0
-                if (line == from_line) {
-                    start_col = m.start - line_start
-                }
-                var end_col = line_len
-                if (line == to_line) {
-                    end_col = m.end - line_start
-                }
-                // Mark cells
-                var col = start_col
-                while (col < end_col) {
-                    const screen_col = gutter_w + col - self.h_scroll_offset
+                const dr_line = self.wrapDisplayRowToLine(dr)
+                const dr_base = self.wrapLineToDisplayRow(dr_line)
+                const wrap_row = dr - dr_base
+                const line_len = self.document.buffer.lineLength(dr_line)
+                const wrap_start = wrap_row * content_cols
+                var wrap_end = wrap_start + content_cols
+                if (wrap_end > line_len) { wrap_end = line_len }
+                var sel_start: i64 = 0
+                if (dr_line == from_line) { sel_start = from_col }
+                var sel_end = line_len
+                if (dr_line == to_line) { sel_end = to_col }
+                if (sel_start < wrap_start) { sel_start = wrap_start }
+                if (sel_end > wrap_end) { sel_end = wrap_end }
+                var col = sel_start
+                while (col < sel_end) {
+                    const screen_col = gutter_w + col - wrap_start
                     if (screen_col >= 0 and screen_col < self.viewport_cols) {
                         const c = self.render_grid.getCell(screen_row, screen_col)
                         c.flags = c.flags | CELL_SEARCH_MATCH
-                        // Highlight current match more prominently
                         if (is_current) {
                             c.bg_type = COLOR_RGB
                             c.bg_val = packRgb(200, 150, 30)
@@ -1684,10 +1711,108 @@ struct Surface {
                     }
                     col += 1
                 }
-                line += 1
+                dr += 1
             }
             mi += 1
         }
+    }
+
+    // ========================================================================
+    // Soft Wrap Map (Zed: WrapMap)
+    // ========================================================================
+
+    /// Rebuild the wrap map by scanning the buffer once. O(buffer_size).
+    /// Computes how many display rows each logical line occupies.
+    fn rebuildWrapMap(content_cols: i64) void {
+        var new_counts: List(i64) = .{}
+        var new_cum: List(i64) = .{}
+        const buf_len = self.document.buffer.len()
+        var cumulative: i64 = 0
+        var line_start: i64 = 0
+        var i: i64 = 0
+        while (i < buf_len) {
+            if (self.document.buffer.charAt(i) == '\n') {
+                const line_len = i - line_start
+                new_cum.append(cumulative)
+                var rows: i64 = 1
+                if (content_cols > 0 and line_len > content_cols) {
+                    rows = (line_len + content_cols - 1) / content_cols
+                }
+                new_counts.append(rows)
+                cumulative += rows
+                line_start = i + 1
+            }
+            i += 1
+        }
+        // Last line (may not end with newline)
+        const last_len = buf_len - line_start
+        new_cum.append(cumulative)
+        var last_rows: i64 = 1
+        if (content_cols > 0 and last_len > content_cols) {
+            last_rows = (last_len + content_cols - 1) / content_cols
+        }
+        new_counts.append(last_rows)
+        cumulative += last_rows
+        self.wrap_counts = new_counts
+        self.wrap_cum_rows = new_cum
+        self.wrap_total_rows = cumulative
+    }
+
+    /// First display row index for a logical line.
+    fn wrapLineToDisplayRow(line: i64) i64 {
+        if (line < 0) { return 0 }
+        if (line >= self.wrap_cum_rows.count) { return self.wrap_total_rows }
+        return self.wrap_cum_rows.get(line)
+    }
+
+    /// Number of display rows for a logical line.
+    fn wrapLineDisplayRows(line: i64) i64 {
+        if (line < 0 or line >= self.wrap_counts.count) { return 1 }
+        return self.wrap_counts.get(line)
+    }
+
+    /// Convert buffer (line, col) to display row index.
+    fn wrapBufToDisplayRow(line: i64, col: i64, content_cols: i64) i64 {
+        const base = self.wrapLineToDisplayRow(line)
+        if (content_cols <= 0) { return base }
+        return base + col / content_cols
+    }
+
+    /// Convert buffer col to display col within a wrapped row.
+    fn wrapBufToDisplayCol(col: i64, content_cols: i64) i64 {
+        if (content_cols <= 0) { return col }
+        return col - (col / content_cols) * content_cols
+    }
+
+    /// Convert display row to logical line (binary search on prefix sums).
+    fn wrapDisplayRowToLine(display_row: i64) i64 {
+        if (display_row < 0) { return 0 }
+        if (display_row >= self.wrap_total_rows) {
+            if (self.wrap_cum_rows.count > 0) { return self.wrap_cum_rows.count - 1 }
+            return 0
+        }
+        var lo: i64 = 0
+        var hi: i64 = self.wrap_cum_rows.count - 1
+        var result: i64 = 0
+        while (lo <= hi) {
+            const mid = (lo + hi) / 2
+            if (self.wrap_cum_rows.get(mid) <= display_row) {
+                result = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return result
+    }
+
+    /// Convert display (row, col) to buffer column within the logical line.
+    fn wrapDisplayToBufferCol(display_row: i64, display_col: i64, content_cols: i64) i64 {
+        const line = self.wrapDisplayRowToLine(display_row)
+        const base = self.wrapLineToDisplayRow(line)
+        const wrap_offset = display_row - base
+        if (content_cols <= 0) { return display_col }
+        return wrap_offset * content_cols + display_col
     }
 
     /// Render the entire editor grid: gutter, content, cursor.
@@ -1712,22 +1837,32 @@ struct Surface {
         const overlay_rows = self.search.overlayRows()
         const content_rows = self.viewport_rows - overlay_rows
 
+        // Rebuild wrap map for current content width
+        self.rebuildWrapMap(content_cols)
+
         // Search overlay at top of grid
         if (overlay_rows > 0) {
             self.renderSearchOverlay(overlay_rows)
         }
 
-        // Render each visible line (offset by overlay)
+        // Render visible display rows (soft-wrapped)
         for row in 0..content_rows {
+            const display_row = self.scroll_offset + row
+            if (display_row >= self.wrap_total_rows) { break }
             const screen_row = row + overlay_rows
-            const doc_line = self.scroll_offset + row
-            if (doc_line >= total_lines) { break }
 
-            // Line number (right-aligned in gutter)
-            self.renderLineNumber(screen_row, doc_line, gutter_w)
+            // Map display row → logical line + wrap offset
+            const doc_line = self.wrapDisplayRowToLine(display_row)
+            const base_display_row = self.wrapLineToDisplayRow(doc_line)
+            const wrap_row = display_row - base_display_row
 
-            // Buffer text content
-            self.renderLineContent(screen_row, doc_line, gutter_w, content_cols)
+            // Line number on first wrap row only
+            if (wrap_row == 0) {
+                self.renderLineNumber(screen_row, doc_line, gutter_w)
+            }
+
+            // Content for this wrap segment
+            self.renderWrappedLineContent(screen_row, doc_line, wrap_row, gutter_w, content_cols)
         }
 
         // Search match highlights
@@ -1769,14 +1904,15 @@ struct Surface {
         self.gridWriteStr(screen_row, start_col, num_str, r, g, b)
     }
 
-    /// Render buffer text content for a line, offset by h_scroll_offset.
-    fn renderLineContent(screen_row: i64, doc_line: i64, gutter_w: i64, content_cols: i64) void {
+    /// Render a wrap segment of a buffer line.
+    /// wrap_row 0 = first content_cols chars, wrap_row 1 = next content_cols, etc.
+    fn renderWrappedLineContent(screen_row: i64, doc_line: i64, wrap_row: i64, gutter_w: i64, content_cols: i64) void {
         const line_len = self.document.buffer.lineLength(doc_line)
         const line_start = self.document.buffer.lineStartOffset(doc_line)
-        const first_char = self.h_scroll_offset
+        const first_char = wrap_row * content_cols
         if (first_char >= line_len) { return }
-        const visible_len = line_len - first_char
-        const max_chars = if (content_cols < visible_len) { content_cols } else { visible_len }
+        const remaining = line_len - first_char
+        const max_chars = if (content_cols < remaining) { content_cols } else { remaining }
         for col in 0..max_chars {
             const ch = self.document.buffer.charAt(line_start + first_char + col)
             if (ch >= 32) {
@@ -1807,61 +1943,79 @@ struct Surface {
     }
 
     /// Set CELL_SELECTED flag on cells that fall within selection ranges.
-    /// Called after content rendering in renderEditorGrid().
+    /// Uses display coordinates for soft-wrapped rendering.
     fn renderSelection(row_offset: i64) void {
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
+        const content_cols = self.viewport_cols - gutter_w
+        if (content_cols <= 0) { return }
         var i: i64 = 0
         while (i < self.document.selection.ranges.count) {
             const r = self.document.selection.ranges.get(i)
             if (r.isEmpty()) { i += 1; continue }
             const sel_from = r.from()
             const sel_to = r.to()
-            // Convert to line/col
             const from_line = self.offsetToLine(sel_from)
             const from_col = sel_from - self.document.buffer.lineStartOffset(from_line)
             const to_line = self.offsetToLine(sel_to)
             const to_col = sel_to - self.document.buffer.lineStartOffset(to_line)
-            // Iterate visible lines in range
-            var line = from_line
-            while (line <= to_line) {
-                const screen_row = line - self.scroll_offset + row_offset
-                if (screen_row < row_offset) { line += 1; continue }
+            // Iterate display rows spanned by selection
+            const from_dr = self.wrapBufToDisplayRow(from_line, from_col, content_cols)
+            const to_dr = self.wrapBufToDisplayRow(to_line, to_col, content_cols)
+            var dr = from_dr
+            while (dr <= to_dr) {
+                const screen_row = dr - self.scroll_offset + row_offset
+                if (screen_row < row_offset) { dr += 1; continue }
                 if (screen_row >= self.viewport_rows) { break }
-                const line_len = self.document.buffer.lineLength(line)
-                var start_col: i64 = 0
-                if (line == from_line) { start_col = from_col }
-                var end_col = line_len
-                if (line == to_line) { end_col = to_col }
-                // Map to screen cols
-                var col = start_col
-                while (col < end_col) {
-                    const screen_col = gutter_w + col - self.h_scroll_offset
+                // Find logical line and wrap segment for this display row
+                const dr_line = self.wrapDisplayRowToLine(dr)
+                const dr_base = self.wrapLineToDisplayRow(dr_line)
+                const wrap_row = dr - dr_base
+                const line_len = self.document.buffer.lineLength(dr_line)
+                // Buffer columns covered by this wrap segment
+                const wrap_start = wrap_row * content_cols
+                var wrap_end = wrap_start + content_cols
+                if (wrap_end > line_len) { wrap_end = line_len }
+                // Selection range on this logical line
+                var sel_start: i64 = 0
+                if (dr_line == from_line) { sel_start = from_col }
+                var sel_end = line_len
+                if (dr_line == to_line) { sel_end = to_col }
+                // Intersect with wrap segment
+                if (sel_start < wrap_start) { sel_start = wrap_start }
+                if (sel_end > wrap_end) { sel_end = wrap_end }
+                // Mark cells
+                var col = sel_start
+                while (col < sel_end) {
+                    const screen_col = gutter_w + col - wrap_start
                     if (screen_col >= 0 and screen_col < self.viewport_cols) {
                         const c = self.render_grid.getCell(screen_row, screen_col)
                         c.flags = c.flags | CELL_SELECTED
                     }
                     col += 1
                 }
-                line += 1
+                dr += 1
             }
             i += 1
         }
     }
 
     /// Mark all cursor positions (selection range heads) with CELL_CURSOR flag.
-    /// Only marks when cursor_visible is true (controlled by blink timer).
+    /// Uses display coordinates for soft-wrapped rendering.
     fn renderCursors(gutter_w: i64, row_offset: i64) void {
         if (!self.cursor_visible) { return }
+        const content_cols = self.viewport_cols - gutter_w
         var i: i64 = 0
         while (i < self.document.selection.ranges.count) {
             const r = self.document.selection.ranges.get(i)
             const head = r.head
             const cursor_line = self.offsetToLine(head)
             const cursor_col = head - self.document.buffer.lineStartOffset(cursor_line)
-            const screen_row = cursor_line - self.scroll_offset + row_offset
+            const display_row = self.wrapBufToDisplayRow(cursor_line, cursor_col, content_cols)
+            const display_col = self.wrapBufToDisplayCol(cursor_col, content_cols)
+            const screen_row = display_row - self.scroll_offset + row_offset
             if (screen_row >= 0 and screen_row < self.viewport_rows) {
-                const screen_col = gutter_w + cursor_col - self.h_scroll_offset
+                const screen_col = gutter_w + display_col
                 if (screen_col >= 0 and screen_col < self.viewport_cols) {
                     const c = self.render_grid.getCell(screen_row, screen_col)
                     c.flags = c.flags | CELL_CURSOR
@@ -1931,12 +2085,13 @@ struct Surface {
 
     /// Mark a single buffer offset as bracket match in the render grid.
     fn markBracketCell(buf_offset: int, gutter_w: i64, row_offset: i64) void {
-        // Convert offset to line/col
+        const content_cols = self.viewport_cols - gutter_w
         const line = self.offsetToLine(buf_offset)
         const col = buf_offset - self.document.buffer.lineStartOffset(line)
-        // Convert to screen coordinates
-        const screen_row = line - self.scroll_offset + row_offset
-        const screen_col = gutter_w + col - self.h_scroll_offset
+        const display_row = self.wrapBufToDisplayRow(line, col, content_cols)
+        const display_col = self.wrapBufToDisplayCol(col, content_cols)
+        const screen_row = display_row - self.scroll_offset + row_offset
+        const screen_col = gutter_w + display_col
         if (screen_row >= 0 and screen_row < self.viewport_rows) {
             if (screen_col >= 0 and screen_col < self.viewport_cols) {
                 const c = self.render_grid.getCell(screen_row, screen_col)
@@ -1946,38 +2101,34 @@ struct Surface {
     }
 
     /// Handle mouse click — position cursor at screen coordinates.
-    /// Converts screen (row, col) to document (line, col) accounting for gutter and scroll.
+    /// Converts display (row, col) to buffer (line, col) via wrap map.
     fn editorClick(screen_row: i64, screen_col: i64) void {
         self.document.history.breakGroup()
         self.last_edit_kind = 0
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
-        // Ignore clicks in gutter
         if (screen_col < gutter_w) { return }
-        const doc_col = screen_col - gutter_w + self.h_scroll_offset
-        const doc_line = screen_row + self.scroll_offset
-        if (doc_line < 0) { return }
-        // Clamp to valid line
-        var target_line = doc_line
+        const content_cols = self.viewport_cols - gutter_w
+        const display_col = screen_col - gutter_w
+        const display_row = screen_row + self.scroll_offset
+        if (display_row < 0) { return }
+        // Map display position to buffer position via wrap map
+        var target_line = self.wrapDisplayRowToLine(display_row)
         if (target_line >= total_lines) { target_line = total_lines - 1 }
         if (target_line < 0) { target_line = 0 }
-        // Clamp col to line length
+        var target_col = self.wrapDisplayToBufferCol(display_row, display_col, content_cols)
         const line_len = self.document.buffer.lineLength(target_line)
-        var target_col = doc_col
         if (target_col > line_len) { target_col = line_len }
         if (target_col < 0) { target_col = 0 }
-        // Update cursor
         self.cursor.line = target_line
         self.cursor.col = target_col
         self.recomputeOffset()
-        // Validate computed offset is within bounds
         if (g_buffer_debug) {
             if (self.cursor.offset < 0 or self.cursor.offset > self.document.buffer.len()) {
                 self.document.buffer.dumpState("editorClick: offset out of bounds")
                 @trap()
             }
         }
-        // Collapse selection to cursor point
         self.document.selection = Selection.point(self.cursor.offset)
         self.renderEditorGrid()
     }
@@ -1990,14 +2141,15 @@ struct Surface {
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
         if (screen_col < gutter_w) { return }
-        const doc_col = screen_col - gutter_w + self.h_scroll_offset
-        const doc_line = screen_row + self.scroll_offset
-        if (doc_line < 0) { return }
-        var target_line = doc_line
+        const content_cols = self.viewport_cols - gutter_w
+        const display_col = screen_col - gutter_w
+        const display_row = screen_row + self.scroll_offset
+        if (display_row < 0) { return }
+        var target_line = self.wrapDisplayRowToLine(display_row)
         if (target_line >= total_lines) { target_line = total_lines - 1 }
         if (target_line < 0) { target_line = 0 }
         const line_len = self.document.buffer.lineLength(target_line)
-        var target_col = doc_col
+        var target_col = self.wrapDisplayToBufferCol(display_row, display_col, content_cols)
         if (target_col >= line_len) { target_col = line_len - 1 }
         if (target_col < 0) { target_col = 0 }
         if (line_len == 0) {
@@ -2040,14 +2192,14 @@ struct Surface {
         self.renderEditorGrid()
     }
 
-    /// Handle triple-click — select the entire line.
+    /// Handle triple-click — select the entire logical line.
     fn editorSelectLine(screen_row: i64) void {
         self.document.history.breakGroup()
         self.last_edit_kind = 0
         const total_lines = self.document.buffer.lineCount()
-        const doc_line = screen_row + self.scroll_offset
-        if (doc_line < 0) { return }
-        var target_line = doc_line
+        const display_row = screen_row + self.scroll_offset
+        if (display_row < 0) { return }
+        var target_line = self.wrapDisplayRowToLine(display_row)
         if (target_line >= total_lines) { target_line = total_lines - 1 }
         if (target_line < 0) { target_line = 0 }
 
@@ -2066,54 +2218,59 @@ struct Surface {
         self.renderEditorGrid()
     }
 
-    /// Handle mouse drag — extend selection from click anchor to current position.
+    /// Handle mouse drag — extend selection via display coordinates.
     fn editorDrag(screen_row: i64, screen_col: i64) void {
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
-        const doc_col = screen_col - gutter_w + self.h_scroll_offset
-        const doc_line = screen_row + self.scroll_offset
-        // Clamp
-        var target_line = doc_line
+        const content_cols = self.viewport_cols - gutter_w
+        const display_col = screen_col - gutter_w
+        const display_row = screen_row + self.scroll_offset
+        var target_line = self.wrapDisplayRowToLine(display_row)
         if (target_line >= total_lines) { target_line = total_lines - 1 }
         if (target_line < 0) { target_line = 0 }
+        var target_col = self.wrapDisplayToBufferCol(display_row, display_col, content_cols)
         const line_len = self.document.buffer.lineLength(target_line)
-        var target_col = doc_col
         if (target_col > line_len) { target_col = line_len }
         if (target_col < 0) { target_col = 0 }
-        // Compute byte offset for head
         const head_offset = self.document.buffer.lineStartOffset(target_line) + target_col
-        // Update cursor to head position
         self.cursor.line = target_line
         self.cursor.col = target_col
         self.cursor.offset = head_offset
-        // Extend primary selection — anchor stays, head moves
         const primary = self.document.selection.primary()
         self.document.selection.replace(self.document.selection.primary_index,
             Range { anchor: primary.anchor, head: head_offset })
         self.renderEditorGrid()
     }
 
-    /// Cursor screen row (for Swift rendering — cursor line minus scroll offset).
+    /// Cursor screen row in display coordinates (accounts for soft wrapping).
     fn editorCursorScreenRow() i64 {
-        return self.cursor.line - self.scroll_offset
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        const content_cols = self.viewport_cols - gutter_w
+        return self.wrapBufToDisplayRow(self.cursor.line, self.cursor.col, content_cols) - self.scroll_offset
     }
 
-    /// Cursor screen col (for Swift rendering — gutter + cursor col minus h_scroll offset).
+    /// Cursor screen col in display coordinates (accounts for soft wrapping).
     fn editorCursorScreenCol() i64 {
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
-        return gutter_w + self.cursor.col - self.h_scroll_offset
+        const content_cols = self.viewport_cols - gutter_w
+        return gutter_w + self.wrapBufToDisplayCol(self.cursor.col, content_cols)
     }
 
-    /// Set scroll offset from external source (scrollbar), clamped to valid range.
+    /// Set scroll offset (display rows) from scrollbar, clamped to valid range.
     fn setScrollOffset(offset: i64) void {
-        const total = self.document.buffer.lineCount()
-        const max_offset = total - self.viewport_rows
+        const total_lines = self.document.buffer.lineCount()
+        const gutter_w = self.gutterWidth(total_lines)
+        const content_cols = self.viewport_cols - gutter_w
+        self.rebuildWrapMap(content_cols)
+        const max_offset = self.wrap_total_rows - self.viewport_rows
         if (offset < 0) { self.scroll_offset = 0 }
         else if (max_offset > 0 and offset > max_offset) { self.scroll_offset = max_offset }
         else { self.scroll_offset = offset }
-        // Sync scroll anchor
-        self.scroll_anchor = self.document.buffer.lineStartOffset(self.scroll_offset)
+        // Sync scroll anchor from display row
+        const anchor_line = self.wrapDisplayRowToLine(self.scroll_offset)
+        self.scroll_anchor = self.document.buffer.lineStartOffset(anchor_line)
         self.renderEditorGrid()
     }
 
@@ -2149,34 +2306,13 @@ struct Surface {
         self.setScrollOffset(self.scroll_offset + rows)
     }
 
-    /// Set horizontal scroll offset (from scrollbar), clamped to valid range.
+    /// Set horizontal scroll offset — disabled with soft wrapping.
     fn setHScrollOffset(offset: i64) void {
-        if (offset < 0) { self.h_scroll_offset = 0 }
-        else { self.h_scroll_offset = offset }
-        self.renderEditorGrid()
+        self.h_scroll_offset = 0
     }
 
-    /// Handle horizontal scroll wheel input — same accumulator pattern as vertical.
+    /// Handle horizontal scroll wheel — disabled with soft wrapping.
     fn hScrollEvent(delta: i64, precise: i64, cell_width: i64, multiplier: i64) void {
-        if (cell_width <= 0) { return }
-
-        var adjusted = delta
-        if (precise == 0) {
-            adjusted = delta * cell_width * multiplier / 1000
-        }
-
-        self.h_scroll_accumulator = self.h_scroll_accumulator + adjusted
-
-        if (self.h_scroll_accumulator < 0) {
-            if (self.h_scroll_accumulator > 0 - cell_width) { return }
-        } else {
-            if (self.h_scroll_accumulator < cell_width) { return }
-        }
-
-        const cols = self.h_scroll_accumulator / cell_width
-        self.h_scroll_accumulator = self.h_scroll_accumulator - cols * cell_width
-
-        self.setHScrollOffset(self.h_scroll_offset + cols)
     }
 
     /// Recompute line/col from byte offset by scanning from start.
