@@ -1,5 +1,7 @@
 {
   "name": "libcotty",
   "version": "0.1.0",
-  "safe": true
+  "safe": true,
+  "libs": ["treesitter_shim"],
+  "c_flags": ["-Lvendor", "-Wl,-rpath,/Users/johnc/cot-land/cotty/libcotty/vendor"]
 }

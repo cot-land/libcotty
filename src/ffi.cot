@@ -3,6 +3,7 @@
 /// Action queue for Cot→Swift communication (poll-drain model).
 
 import "std/sys"
+import "std/string"
 import "app"
 import "surface"
 import "buffer"
@@ -23,6 +24,7 @@ import "file_tree"
 import "command_palette"
 import "theme_palette"
 import "split"
+import "treesitter"
 
 // ============================================================================
 // Globals
@@ -144,6 +146,9 @@ export fn cotty_app_new() i64 {
 
     // Init split tree storage
     g_split_count = 0
+
+    // Init tree-sitter markdown context
+    tsInitMarkdown()
 
     return @ptrToInt(&g_app)
 }
@@ -342,6 +347,15 @@ export fn cotty_surface_text(surface: i64, ptr: *u8, len: i64) void {
     }
 }
 
+/// Set the filepath on a surface's document.
+/// Copies bytes into Cot-owned memory (caller's buffer is temporary).
+export fn cotty_surface_set_filepath(surface: i64, ptr: *u8, len: i64) void {
+    const sptr = getSurfacePtr(surface)
+    var sb: StringBuilder = .{}
+    sb.append(@string(@ptrToInt(ptr), len))
+    sptr.document.filepath = sb.toString()
+}
+
 /// Load content into a surface, replacing existing buffer.
 /// Resets the entire document (buffer + history + selection) to avoid stale state.
 export fn cotty_surface_load_content(surface: i64, ptr: *u8, len: i64) void {
@@ -357,8 +371,11 @@ export fn cotty_surface_load_content(surface: i64, ptr: *u8, len: i64) void {
     sptr.document.history = History.init()
     sptr.document.selection = Selection.point(0)
     sptr.document.dirty = false
-    // Reset cursor to start
+    // Reset cursor and scroll to start
     sptr.cursor = Cursor.init()
+    sptr.scroll_offset = 0
+    sptr.scroll_accumulator = 0
+    sptr.scroll_anchor = 0
     // Ensure Insert mode for editing
     sptr.mode = Mode.Insert
 
@@ -1424,6 +1441,13 @@ export fn cotty_inspector_rebuild_editor_state(surface: i64) void {
     const sptr = getSurfacePtr(surface)
     if (!sptr.inspector.active) { return }
     if (sptr.inspector.panel != PANEL_EDITOR) { return }
+    // Tree-sitter debug info
+    var has_fp = false
+    var ew_md = false
+    if (sptr.document.filepath) |path| {
+        has_fp = true
+        ew_md = endsWith(path, ".md")
+    }
     const state = EditorDebugState {
         buf_len: sptr.document.buffer.len(),
         gap_start: sptr.document.buffer.gap_start,
@@ -1442,6 +1466,12 @@ export fn cotty_inspector_rebuild_editor_state(surface: i64) void {
         at_root: sptr.document.history.atRoot(),
         can_redo: sptr.document.history.canRedo(),
         valid: sptr.document.buffer.validate(),
+        ts_initialized: g_ts_initialized,
+        ts_ctx: g_ts_md_ctx,
+        ts_token_count: g_ts_tokens.count,
+        ts_has_filepath: has_fp,
+        ts_ends_with_md: ew_md,
+        ts_has_treesitter: sptr.hasTreeSitter(),
     }
     sptr.inspector.rebuildEditorState(state)
 }

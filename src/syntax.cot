@@ -1,0 +1,127 @@
+/// Syntax highlighting: line-based token scanner for Cot source files.
+/// Token types, colors, and keyword classification.
+
+import "cell"
+
+// ============================================================================
+// Token Types
+// ============================================================================
+
+const TOK_DEFAULT: i64 = 0
+const TOK_KEYWORD: i64 = 1
+const TOK_TYPE: i64 = 2
+const TOK_STRING: i64 = 3
+const TOK_NUMBER: i64 = 4
+const TOK_COMMENT: i64 = 5
+const TOK_BUILTIN: i64 = 6
+const TOK_FUNCTION: i64 = 7
+const TOK_CHAR_LIT: i64 = 8
+
+// ============================================================================
+// One Dark Color Palette
+// ============================================================================
+
+const SYN_KEYWORD_R: i64 = 198
+const SYN_KEYWORD_G: i64 = 120
+const SYN_KEYWORD_B: i64 = 221
+
+const SYN_TYPE_R: i64 = 86
+const SYN_TYPE_G: i64 = 182
+const SYN_TYPE_B: i64 = 194
+
+const SYN_STRING_R: i64 = 152
+const SYN_STRING_G: i64 = 195
+const SYN_STRING_B: i64 = 121
+
+const SYN_NUMBER_R: i64 = 209
+const SYN_NUMBER_G: i64 = 154
+const SYN_NUMBER_B: i64 = 102
+
+const SYN_COMMENT_R: i64 = 92
+const SYN_COMMENT_G: i64 = 99
+const SYN_COMMENT_B: i64 = 112
+
+const SYN_BUILTIN_R: i64 = 229
+const SYN_BUILTIN_G: i64 = 192
+const SYN_BUILTIN_B: i64 = 123
+
+const SYN_FUNCTION_R: i64 = 97
+const SYN_FUNCTION_G: i64 = 175
+const SYN_FUNCTION_B: i64 = 239
+
+// ============================================================================
+// Token → Color
+// ============================================================================
+
+/// Get packed RGB for a token type. Returns 0 for TOK_DEFAULT (caller uses theme fg).
+fn tokenColor(tok: i64) i64 {
+    if (tok == TOK_KEYWORD) { return packRgb(SYN_KEYWORD_R, SYN_KEYWORD_G, SYN_KEYWORD_B) }
+    if (tok == TOK_TYPE) { return packRgb(SYN_TYPE_R, SYN_TYPE_G, SYN_TYPE_B) }
+    if (tok == TOK_STRING) { return packRgb(SYN_STRING_R, SYN_STRING_G, SYN_STRING_B) }
+    if (tok == TOK_CHAR_LIT) { return packRgb(SYN_STRING_R, SYN_STRING_G, SYN_STRING_B) }
+    if (tok == TOK_NUMBER) { return packRgb(SYN_NUMBER_R, SYN_NUMBER_G, SYN_NUMBER_B) }
+    if (tok == TOK_COMMENT) { return packRgb(SYN_COMMENT_R, SYN_COMMENT_G, SYN_COMMENT_B) }
+    if (tok == TOK_BUILTIN) { return packRgb(SYN_BUILTIN_R, SYN_BUILTIN_G, SYN_BUILTIN_B) }
+    if (tok == TOK_FUNCTION) { return packRgb(SYN_FUNCTION_R, SYN_FUNCTION_G, SYN_FUNCTION_B) }
+    return 0
+}
+
+// ============================================================================
+// Word Classification
+// ============================================================================
+
+/// Classify an identifier word as keyword, type, or default.
+fn classifyWord(word: string) i64 {
+    if (word.len < 2 or word.len > 10) { return TOK_DEFAULT }
+
+    // Keywords (control flow, declarations, operators)
+    if (word == "fn" or word == "var" or word == "const" or word == "let"
+        or word == "if" or word == "else" or word == "while" or word == "for" or word == "in"
+        or word == "return" or word == "break" or word == "continue"
+        or word == "switch" or word == "try" or word == "catch"
+        or word == "defer" or word == "errdefer" or word == "import" or word == "test"
+        or word == "static" or word == "new" or word == "and" or word == "or" or word == "not"
+        or word == "spawn" or word == "comptime" or word == "inline"
+        or word == "struct" or word == "enum" or word == "union"
+        or word == "type" or word == "trait" or word == "impl" or word == "where"
+        or word == "pub" or word == "export" or word == "extern"
+        or word == "true" or word == "false" or word == "null" or word == "undefined"
+        or word == "error" or word == "packed" or word == "self") {
+        return TOK_KEYWORD
+    }
+
+    // Type keywords
+    if (word == "i8" or word == "i16" or word == "i32" or word == "i64"
+        or word == "u8" or word == "u16" or word == "u32" or word == "u64"
+        or word == "f32" or word == "f64"
+        or word == "bool" or word == "void" or word == "int" or word == "float"
+        or word == "byte" or word == "string" or word == "noreturn") {
+        return TOK_TYPE
+    }
+
+    return TOK_DEFAULT
+}
+
+// ============================================================================
+// Character Classification
+// ============================================================================
+
+/// Check if a character is an identifier start (letter or underscore).
+fn synIsIdStart(ch: i64) bool {
+    return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_'
+}
+
+/// Check if a character is an identifier continuation (letter, digit, or underscore).
+fn synIsIdContinue(ch: i64) bool {
+    return synIsIdStart(ch) or (ch >= '0' and ch <= '9')
+}
+
+/// Check if a character is a decimal digit.
+fn synIsDigit(ch: i64) bool {
+    return ch >= '0' and ch <= '9'
+}
+
+/// Check if a character is a hex digit.
+fn synIsHexDigit(ch: i64) bool {
+    return (ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F')
+}

@@ -77,6 +77,12 @@ struct EditorDebugState {
     at_root: bool,
     can_redo: bool,
     valid: bool,
+    ts_initialized: bool,
+    ts_ctx: i64,
+    ts_token_count: i64,
+    ts_has_filepath: bool,
+    ts_ends_with_md: bool,
+    ts_has_treesitter: bool,
 }
 
 struct Inspector {
@@ -190,7 +196,7 @@ struct Inspector {
         } else if (self.panel == PANEL_EDITOR) {
             self.editor_scroll = self.editor_scroll + delta
             if (self.editor_scroll < 0) { self.editor_scroll = 0 }
-            const max_scroll: i64 = 20 - (self.rows - 2)
+            const max_scroll: i64 = 30 - (self.rows - 2)
             if (max_scroll < 0) {
                 self.editor_scroll = 0
             } else if (self.editor_scroll > max_scroll) {
@@ -209,7 +215,7 @@ struct Inspector {
         if (self.panel == PANEL_TERMIO) { return self.vt_events.count }
         if (self.panel == PANEL_SCREEN) { return 25 }
         if (self.panel == PANEL_MODES) { return 20 }
-        if (self.panel == PANEL_EDITOR) { return 20 }
+        if (self.panel == PANEL_EDITOR) { return 30 }
         return 0
     }
 
@@ -264,7 +270,7 @@ struct Inspector {
         } else if (self.panel == PANEL_EDITOR) {
             self.editor_scroll = offset
             if (self.editor_scroll < 0) { self.editor_scroll = 0 }
-            const max_scroll: i64 = 20 - (self.rows - 2)
+            const max_scroll: i64 = 30 - (self.rows - 2)
             if (max_scroll < 0) {
                 self.editor_scroll = 0
             } else if (self.editor_scroll > max_scroll) {
@@ -871,6 +877,54 @@ struct Inspector {
         } else {
             self.writeStr(row, value_col, "no", 150, 150, 150)
         }
+        row += 2
+
+        // -- Tree-sitter section --
+        self.writeStr(row, 2, "Tree-sitter", 200, 170, 100)
+        row += 1
+
+        self.writeStr(row, label_col, "initialized", 130, 130, 140)
+        if (state.ts_initialized) {
+            self.writeStr(row, value_col, "yes", 100, 220, 100)
+        } else {
+            self.writeStr(row, value_col, "no", 220, 100, 100)
+        }
+        row += 1
+
+        var sb_ctx: StringBuilder = .{}
+        sb_ctx.appendInt(state.ts_ctx)
+        self.writeStr(row, label_col, "ctx", 130, 130, 140)
+        self.writeStr(row, value_col, sb_ctx.toString(), 220, 220, 220)
+        row += 1
+
+        self.writeStr(row, label_col, "has_filepath", 130, 130, 140)
+        if (state.ts_has_filepath) {
+            self.writeStr(row, value_col, "yes", 100, 220, 100)
+        } else {
+            self.writeStr(row, value_col, "no", 220, 100, 100)
+        }
+        row += 1
+
+        self.writeStr(row, label_col, "ends_with_md", 130, 130, 140)
+        if (state.ts_ends_with_md) {
+            self.writeStr(row, value_col, "yes", 100, 220, 100)
+        } else {
+            self.writeStr(row, value_col, "no", 220, 100, 100)
+        }
+        row += 1
+
+        self.writeStr(row, label_col, "hasTreeSitter", 130, 130, 140)
+        if (state.ts_has_treesitter) {
+            self.writeStr(row, value_col, "yes", 100, 220, 100)
+        } else {
+            self.writeStr(row, value_col, "no", 220, 100, 100)
+        }
+        row += 1
+
+        var sb_tok: StringBuilder = .{}
+        sb_tok.appendInt(state.ts_token_count)
+        self.writeStr(row, label_col, "token_count", 130, 130, 140)
+        self.writeStr(row, value_col, sb_tok.toString(), 220, 220, 220)
     }
 
     // ========================================================================

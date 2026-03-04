@@ -1,0 +1,149 @@
+/// Tree-sitter syntax highlighting integration.
+/// Wraps the C shim (libtreesitter_shim.dylib) for markdown highlighting.
+/// Maps tree-sitter capture names to existing token types from syntax.cot.
+///
+/// Global state: one shared markdown context + per-byte token array.
+/// The token array is rebuilt each frame from the full document text.
+
+import "std/sys"
+import "std/string"
+import "std/list"
+import "syntax"
+
+// ============================================================================
+// Extern declarations — resolved at load time from libtreesitter_shim.dylib
+// ============================================================================
+
+extern fn cotty_ts_init_markdown() i64
+extern fn cotty_ts_highlight(ctx: i64, text: i64, text_len: i64) i64
+extern fn cotty_ts_last_count(ctx: i64) i64
+extern fn cotty_ts_span_start(spans: i64, idx: i64) i64
+extern fn cotty_ts_span_end(spans: i64, idx: i64) i64
+extern fn cotty_ts_span_capture(spans: i64, idx: i64) i64
+extern fn cotty_ts_span_is_inline(spans: i64, idx: i64) i64
+extern fn cotty_ts_capture_name(ctx: i64, capture_idx: i64, is_inline: i64) i64
+extern fn cotty_ts_capture_name_len(ctx: i64, capture_idx: i64, is_inline: i64) i64
+extern fn cotty_ts_capture_count(ctx: i64, is_inline: i64) i64
+extern fn cotty_ts_free_spans(spans: i64) void
+extern fn cotty_ts_destroy(ctx: i64) void
+
+// ============================================================================
+// Global state
+// ============================================================================
+
+var g_ts_md_ctx: i64 = 0         // markdown tree-sitter context (0 = not initialized)
+var g_ts_block_lut: List(i64) = undefined   // block capture index → token type
+var g_ts_inline_lut: List(i64) = undefined  // inline capture index → token type
+var g_ts_tokens: List(i64) = undefined      // per-byte-offset token types (rebuilt each frame)
+var g_ts_initialized: bool = false
+
+// ============================================================================
+// Capture name → token type mapping
+// ============================================================================
+
+/// Map a tree-sitter capture name to a syntax token type.
+fn captureNameToToken(name: string) i64 {
+    if (name == "text.title") { return TOK_KEYWORD }
+    if (name == "text.literal") { return TOK_STRING }
+    if (name == "text.emphasis") { return TOK_TYPE }
+    if (name == "text.strong") { return TOK_TYPE }
+    if (name == "text.uri") { return TOK_FUNCTION }
+    if (name == "text.reference") { return TOK_FUNCTION }
+    if (name == "punctuation.special") { return TOK_BUILTIN }
+    if (name == "punctuation.delimiter") { return TOK_COMMENT }
+    if (name == "string.escape") { return TOK_BUILTIN }
+    return TOK_DEFAULT
+}
+
+// ============================================================================
+// Init / Query
+// ============================================================================
+
+/// Initialize the global markdown tree-sitter context (lazy, called once).
+fn tsInitMarkdown() void {
+    if (g_ts_initialized) { return }
+    g_ts_initialized = true
+    var bl: List(i64) = .{}
+    var il: List(i64) = .{}
+    var tk: List(i64) = .{}
+    g_ts_block_lut = bl
+    g_ts_inline_lut = il
+    g_ts_tokens = tk
+    g_ts_md_ctx = cotty_ts_init_markdown()
+    if (g_ts_md_ctx != 0) {
+        buildCaptureLut(g_ts_md_ctx, 0, &g_ts_block_lut)
+        buildCaptureLut(g_ts_md_ctx, 1, &g_ts_inline_lut)
+    }
+}
+
+/// Check if markdown highlighting is available.
+fn tsHasMarkdown() bool {
+    return g_ts_initialized and g_ts_md_ctx != 0
+}
+
+/// Build per-capture-index → token type lookup table.
+fn buildCaptureLut(ctx: i64, is_inline: i64, out: *List(i64)) void {
+    const count = cotty_ts_capture_count(ctx, is_inline)
+    var i: i64 = 0
+    while (i < count) {
+        const name_ptr = cotty_ts_capture_name(ctx, i, is_inline)
+        const name_len = cotty_ts_capture_name_len(ctx, i, is_inline)
+        const name = @string(name_ptr, name_len)
+        out.append(captureNameToToken(name))
+        i += 1
+    }
+}
+
+/// Rebuild the global per-byte token array from tree-sitter.
+/// Call this once per frame before rendering.
+fn tsRebuildHighlights(text: string) void {
+    // Clear and initialize all bytes to TOK_DEFAULT
+    g_ts_tokens.count = 0
+    var b: i64 = 0
+    while (b < text.len) {
+        g_ts_tokens.append(TOK_DEFAULT)
+        b += 1
+    }
+
+    // Run tree-sitter highlighting
+    const spans = cotty_ts_highlight(g_ts_md_ctx, @ptrOf(text), text.len)
+    const span_count = cotty_ts_last_count(g_ts_md_ctx)
+    if (spans == 0 or span_count == 0) { return }
+
+    // Fill token array from spans (last writer wins for overlapping spans)
+    var i: i64 = 0
+    while (i < span_count) {
+        const start = cotty_ts_span_start(spans, i)
+        const end = cotty_ts_span_end(spans, i)
+        const capture_idx = cotty_ts_span_capture(spans, i)
+        const is_inline = cotty_ts_span_is_inline(spans, i)
+
+        // Look up token from precomputed LUT
+        const lut = if (is_inline != 0) { &g_ts_inline_lut } else { &g_ts_block_lut }
+        var tok = TOK_DEFAULT
+        if (capture_idx < lut.count) {
+            tok = lut.get(capture_idx)
+        }
+
+        // Fill byte range
+        if (tok != TOK_DEFAULT) {
+            var off = start
+            while (off < end and off < text.len) {
+                g_ts_tokens.set(off, tok)
+                off += 1
+            }
+        }
+
+        i += 1
+    }
+
+    cotty_ts_free_spans(spans)
+}
+
+/// Get the token type for a given byte offset. Returns TOK_DEFAULT if no highlighting.
+fn tsTokenAt(byte_offset: i64) i64 {
+    if (byte_offset < g_ts_tokens.count) {
+        return g_ts_tokens.get(byte_offset)
+    }
+    return TOK_DEFAULT
+}

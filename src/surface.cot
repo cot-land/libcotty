@@ -22,6 +22,8 @@ import "history"
 import "document"
 import "movement"
 import "search"
+import "syntax"
+import "treesitter"
 
 // ============================================================================
 // Pipe fd unpacking (same bit ops as pty.cot)
@@ -152,6 +154,7 @@ struct Surface {
         var yank: List(u8) = .{}
         var wc: List(i64) = .{}
         var wcr: List(i64) = .{}
+
         return new Surface {
             kind: SurfaceKind.Editor,
             document: Document.init(),
@@ -183,6 +186,8 @@ struct Surface {
             wrap_counts: wc,
             wrap_cum_rows: wcr,
             wrap_total_rows: 0,
+
+
         }
     }
 
@@ -198,6 +203,7 @@ struct Surface {
             var yank2: List(u8) = .{}
             var wc2: List(i64) = .{}
             var wcr2: List(i64) = .{}
+
             var s = new Surface {
                 kind: SurfaceKind.Editor,
                 document: Document.init(),
@@ -229,13 +235,17 @@ struct Surface {
                 wrap_counts: wc2,
                 wrap_cum_rows: wcr2,
                 wrap_total_rows: 0,
+    
+
             }
             s.document.filepath = path
+
             return s
         }
 
         var wc3: List(i64) = .{}
         var wcr3: List(i64) = .{}
+
         var s = new Surface {
             kind: SurfaceKind.Editor,
             document: Document.initWithContent(content),
@@ -267,8 +277,11 @@ struct Surface {
             wrap_counts: wc3,
             wrap_cum_rows: wcr3,
             wrap_total_rows: 0,
+
+
         }
         s.document.filepath = path
+        // s.initTreeSitter(path)
         return s
     }
 
@@ -293,6 +306,7 @@ struct Surface {
         var yank: List(u8) = .{}
         var wc4: List(i64) = .{}
         var wcr4: List(i64) = .{}
+
 
         return new Surface {
             kind: SurfaceKind.Terminal,
@@ -325,6 +339,8 @@ struct Surface {
             wrap_counts: wc4,
             wrap_cum_rows: wcr4,
             wrap_total_rows: 0,
+
+
         }
     }
 
@@ -332,6 +348,15 @@ struct Surface {
     /// final memory location (i.e., after being added to the surface list).
     fn startIoThread() void {
         self.io_thread = Thread.spawn(@ptrToInt(ioReaderMain), @ptrToInt(self))
+    }
+
+    /// Initialize tree-sitter context based on file extension.
+    /// Check if this surface should have syntax highlighting.
+    fn hasTreeSitter() bool {
+        if (self.document.filepath) |path| {
+            return endsWith(path, ".md") and tsHasMarkdown()
+        }
+        return false
     }
 
     /// Handle an input action, dispatching by current mode.
@@ -1840,6 +1865,12 @@ struct Surface {
         // Rebuild wrap map for current content width
         self.rebuildWrapMap(content_cols)
 
+        // Rebuild tree-sitter highlights (Phase 1: full text each frame)
+        if (self.hasTreeSitter()) {
+            const text = self.document.buffer.toString()
+            tsRebuildHighlights(text)
+        }
+
         // Search overlay at top of grid
         if (overlay_rows > 0) {
             self.renderSearchOverlay(overlay_rows)
@@ -1913,13 +1944,24 @@ struct Surface {
         if (first_char >= line_len) { return }
         const remaining = line_len - first_char
         const max_chars = if (content_cols < remaining) { content_cols } else { remaining }
+        const has_hl = self.hasTreeSitter()
         for col in 0..max_chars {
-            const ch = self.document.buffer.charAt(line_start + first_char + col)
+            const byte_offset = line_start + first_char + col
+            const ch = self.document.buffer.charAt(byte_offset)
             if (ch >= 32) {
                 const c = self.render_grid.getCell(screen_row, gutter_w + col)
                 c.codepoint = ch
                 c.fg_type = COLOR_RGB
-                c.fg_val = packRgb(THEME_FG_R, THEME_FG_G, THEME_FG_B)
+                // Look up syntax token color
+                var fg = packRgb(THEME_FG_R, THEME_FG_G, THEME_FG_B)
+                if (has_hl) {
+                    const tok = tsTokenAt(byte_offset)
+                    const tok_color = tokenColor(tok)
+                    if (tok_color != 0) {
+                        fg = tok_color
+                    }
+                }
+                c.fg_val = fg
             }
         }
     }
