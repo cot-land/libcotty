@@ -21,6 +21,7 @@ import "transaction"
 import "history"
 import "document"
 import "movement"
+import "search"
 
 // ============================================================================
 // Pipe fd unpacking (same bit ops as pty.cot)
@@ -137,6 +138,7 @@ struct Surface {
     last_edit_kind: int,  // 0=none, 1=insert, 2=delete — for undo grouping
     scroll_anchor: int,   // byte offset of first visible line (Zed: ScrollAnchor)
     yank_is_linewise: bool,  // true if yank buffer represents full lines (Zed: clipboard_kind)
+    search: *SearchState,  // Find & replace overlay (Zed: BufferSearchBar)
 
     /// Create an empty, untitled editor surface (heap-allocated with ARC).
     static fn init() *Surface {
@@ -172,6 +174,7 @@ struct Surface {
             last_edit_kind: 0,
             scroll_anchor: 0,
             yank_is_linewise: false,
+            search: SearchState.init(),
         }
     }
 
@@ -212,6 +215,7 @@ struct Surface {
                 last_edit_kind: 0,
                 scroll_anchor: 0,
                 yank_is_linewise: false,
+                search: SearchState.init(),
             }
             s.document.filepath = path
             return s
@@ -244,6 +248,7 @@ struct Surface {
             last_edit_kind: 0,
             scroll_anchor: 0,
             yank_is_linewise: false,
+            search: SearchState.init(),
         }
         s.document.filepath = path
         return s
@@ -296,6 +301,7 @@ struct Surface {
             last_edit_kind: 0,
             scroll_anchor: 0,
             yank_is_linewise: false,
+            search: SearchState.init(),
         }
     }
 
@@ -360,26 +366,28 @@ struct Surface {
                     if (closing > 0) {
                         var cs = ChangeSet.init()
                         if (cursor_before > 0) { cs.retain(cursor_before) }
-                        cs.insertByte(key)
+                        cs.insertCodepoint(key)
                         cs.insertByte(closing)
                         const rest = self.document.buffer.len() - cursor_before
                         if (rest > 0) { cs.retain(rest) }
                         var txn = Transaction { changes: cs }
-                        const cursor_after = cursor_before + 1
-                        self.document.apply(txn, cursor_before, cursor_after)
+                        const key_bytes = utf8CodepointLen(key)
+                        const cursor_after = cursor_before + key_bytes
+                        self.applyEdit(txn, cursor_before, cursor_after)
                         self.cursor.offset = cursor_after
-                        self.cursor.col += 1
+                        self.cursor.col += key_bytes
                     } else {
                         var cs = ChangeSet.init()
                         if (cursor_before > 0) { cs.retain(cursor_before) }
-                        cs.insertByte(key)
+                        cs.insertCodepoint(key)
                         const rest = self.document.buffer.len() - cursor_before
                         if (rest > 0) { cs.retain(rest) }
                         var txn = Transaction { changes: cs }
-                        const cursor_after = cursor_before + 1
-                        self.document.apply(txn, cursor_before, cursor_after)
+                        const key_bytes = utf8CodepointLen(key)
+                        const cursor_after = cursor_before + key_bytes
+                        self.applyEdit(txn, cursor_before, cursor_after)
                         self.cursor.offset = cursor_after
-                        self.cursor.col += 1
+                        self.cursor.col += key_bytes
                     }
                 }
             },
@@ -402,8 +410,11 @@ struct Surface {
                 }
                 if (self.cursor.offset > 0) {
                     const cursor_before = self.cursor.offset
-                    const deleted_char = self.document.buffer.charAt(cursor_before - 1)
-                    const expected_close = closingBracketFor(deleted_char)
+                    // Find start of the codepoint to delete
+                    const cp_start = prevCodepointStart(&self.document.buffer, cursor_before)
+                    const cp_len = cursor_before - cp_start
+                    const deleted_cp = utf8DecodeAt(&self.document.buffer, cp_start)
+                    const expected_close = closingBracketFor(deleted_cp)
                     var delete_pair = false
                     if (expected_close > 0 and cursor_before < self.document.buffer.len()) {
                         if (self.document.buffer.charAt(cursor_before) == expected_close) {
@@ -411,24 +422,24 @@ struct Surface {
                         }
                     }
                     var cs = ChangeSet.init()
-                    if (cursor_before > 1) { cs.retain(cursor_before - 1) }
+                    if (cp_start > 0) { cs.retain(cp_start) }
                     if (delete_pair) {
-                        cs.delete(2)
+                        cs.delete(cp_len + 1)
                         const rest = self.document.buffer.len() - cursor_before - 1
                         if (rest > 0) { cs.retain(rest) }
                     } else {
-                        cs.delete(1)
+                        cs.delete(cp_len)
                         const rest = self.document.buffer.len() - cursor_before
                         if (rest > 0) { cs.retain(rest) }
                     }
                     var txn = Transaction { changes: cs }
-                    const cursor_after = cursor_before - 1
-                    self.document.apply(txn, cursor_before, cursor_after)
+                    const cursor_after = cp_start
+                    self.applyEdit(txn, cursor_before, cursor_after)
                     self.cursor.offset = cursor_after
-                    if (deleted_char == '\n') {
+                    if (deleted_cp == '\n') {
                         self.recomputeLineCol()
                     } else {
-                        self.cursor.col -= 1
+                        self.cursor.col -= cp_len
                     }
                 }
             },
@@ -455,13 +466,14 @@ struct Surface {
                 }
                 if (self.cursor.offset < self.document.buffer.len()) {
                     const cursor_before = self.cursor.offset
+                    const cp_len = utf8ByteLen(self.document.buffer.charAt(cursor_before))
                     var cs = ChangeSet.init()
                     if (cursor_before > 0) { cs.retain(cursor_before) }
-                    cs.delete(1)
-                    const rest = self.document.buffer.len() - cursor_before - 1
+                    cs.delete(cp_len)
+                    const rest = self.document.buffer.len() - cursor_before - cp_len
                     if (rest > 0) { cs.retain(rest) }
                     var txn = Transaction { changes: cs }
-                    self.document.apply(txn, cursor_before, cursor_before)
+                    self.applyEdit(txn, cursor_before, cursor_before)
                 }
             },
             InputAction.delete_selection => {
@@ -524,7 +536,7 @@ struct Surface {
                     const rest = self.document.buffer.len() - self.cursor.offset
                     if (rest > 0) { cs.retain(rest) }
                     var txn = Transaction { changes: cs }
-                    self.document.apply(txn, self.cursor.offset, line_start)
+                    self.applyEdit(txn, self.cursor.offset, line_start)
                     self.cursor.offset = line_start
                     self.recomputeLineCol()
                     self.document.selection = Selection.point(self.cursor.offset)
@@ -558,118 +570,91 @@ struct Surface {
     }
 
     /// Move a byte offset left by one position.
+    /// Delegates to movePosLeft() in movement.cot.
     fn moveOffsetLeft(offset: int) int {
-        if (offset > 0) { return offset - 1 }
-        return 0
+        return movePosLeft(&self.document.buffer, offset)
     }
 
     /// Move a byte offset right by one position.
+    /// Delegates to movePosRight() in movement.cot.
     fn moveOffsetRight(offset: int) int {
-        if (offset < self.document.buffer.len()) { return offset + 1 }
-        return self.document.buffer.len()
+        return movePosRight(&self.document.buffer, offset)
     }
 
     /// Move a byte offset up one line, targeting the same column.
+    /// Delegates to moveUp() in movement.cot.
     fn moveOffsetUp(offset: int) int {
         const line = self.offsetToLine(offset)
-        if (line == 0) { return offset }
         const col = offset - self.document.buffer.lineStartOffset(line)
-        const target_line = line - 1
-        const target_line_len = self.document.buffer.lineLength(target_line)
-        var target_col = col
-        if (target_col > target_line_len) { target_col = target_line_len }
-        return self.document.buffer.lineStartOffset(target_line) + target_col
+        const result = moveUp(&self.document.buffer, line, col, col)
+        return result.offset
     }
 
     /// Move a byte offset down one line, targeting the same column.
+    /// Delegates to moveDown() in movement.cot.
     fn moveOffsetDown(offset: int) int {
         const line = self.offsetToLine(offset)
-        const total = self.document.buffer.lineCount()
-        if (line >= total - 1) { return offset }
         const col = offset - self.document.buffer.lineStartOffset(line)
-        const target_line = line + 1
-        const target_line_len = self.document.buffer.lineLength(target_line)
-        var target_col = col
-        if (target_col > target_line_len) { target_col = target_line_len }
-        return self.document.buffer.lineStartOffset(target_line) + target_col
+        const total = self.document.buffer.lineCount()
+        const result = moveDown(&self.document.buffer, line, col, col, total)
+        return result.offset
     }
 
     /// Move a byte offset to the start of its line.
+    /// Delegates to moveLineStart() in movement.cot.
     fn moveOffsetLineStart(offset: int) int {
         const line = self.offsetToLine(offset)
-        return self.document.buffer.lineStartOffset(line)
+        return moveLineStart(&self.document.buffer, line)
     }
 
     /// Move a byte offset to the end of its line.
+    /// Delegates to moveLineEnd() in movement.cot.
     fn moveOffsetLineEnd(offset: int) int {
         const line = self.offsetToLine(offset)
-        return self.document.buffer.lineStartOffset(line) + self.document.buffer.lineLength(line)
+        return moveLineEnd(&self.document.buffer, line)
     }
 
     /// Move to start of document.
+    /// Delegates to moveToBufferStart() in movement.cot.
     fn moveOffsetDocStart(offset: int) int {
-        return 0
+        return moveToBufferStart()
     }
 
     /// Move to end of document.
+    /// Delegates to moveToBufferEnd() in movement.cot.
     fn moveOffsetDocEnd(offset: int) int {
-        return self.document.buffer.len()
+        return moveToBufferEnd(&self.document.buffer)
     }
 
-    /// Move a byte offset forward by one word (inline charCategory to avoid compiler bug).
+    /// Move a byte offset forward by one word.
+    /// Delegates to moveWordForward() in movement.cot.
     fn moveOffsetWordForward(offset: int) int {
-        const buf_len = self.document.buffer.len()
-        if (offset >= buf_len) { return buf_len }
-        var pos = offset
-        const start_cat = charCategory(self.document.buffer.charAt(pos))
-        while (pos < buf_len) {
-            if (charCategory(self.document.buffer.charAt(pos)) != start_cat) { break }
-            pos += 1
-        }
-        while (pos < buf_len) {
-            if (charCategory(self.document.buffer.charAt(pos)) != 0) { break }
-            pos += 1
-        }
-        return pos
+        return moveWordForward(&self.document.buffer, offset)
     }
 
     /// Move a byte offset backward by one word.
+    /// Delegates to moveWordBackward() in movement.cot.
     fn moveOffsetWordBackward(offset: int) int {
-        if (offset == 0) { return 0 }
-        var pos = offset - 1
-        while (pos > 0) {
-            if (charCategory(self.document.buffer.charAt(pos)) != 0) { break }
-            pos -= 1
-        }
-        const cat = charCategory(self.document.buffer.charAt(pos))
-        while (pos > 0) {
-            if (charCategory(self.document.buffer.charAt(pos - 1)) != cat) { break }
-            pos -= 1
-        }
-        return pos
+        return moveWordBackward(&self.document.buffer, offset)
     }
 
     /// Move a byte offset up one line using a specific goal column.
+    /// Delegates to moveUp() in movement.cot.
     fn moveOffsetUpWithGoal(offset: int, goal_col: int) int {
         const line = self.offsetToLine(offset)
-        if (line == 0) { return offset }
-        const target_line = line - 1
-        const target_line_len = self.document.buffer.lineLength(target_line)
-        var target_col = goal_col
-        if (target_col > target_line_len) { target_col = target_line_len }
-        return self.document.buffer.lineStartOffset(target_line) + target_col
+        const col = offset - self.document.buffer.lineStartOffset(line)
+        const result = moveUp(&self.document.buffer, line, col, goal_col)
+        return result.offset
     }
 
     /// Move a byte offset down one line using a specific goal column.
+    /// Delegates to moveDown() in movement.cot.
     fn moveOffsetDownWithGoal(offset: int, goal_col: int) int {
         const line = self.offsetToLine(offset)
+        const col = offset - self.document.buffer.lineStartOffset(line)
         const total = self.document.buffer.lineCount()
-        if (line >= total - 1) { return offset }
-        const target_line = line + 1
-        const target_line_len = self.document.buffer.lineLength(target_line)
-        var target_col = goal_col
-        if (target_col > target_line_len) { target_col = target_line_len }
-        return self.document.buffer.lineStartOffset(target_line) + target_col
+        const result = moveDown(&self.document.buffer, line, col, goal_col, total)
+        return result.offset
     }
 
     /// Apply a movement action to ALL selection ranges (multi-cursor aware).
@@ -764,10 +749,8 @@ struct Surface {
     /// Insert a character at ALL cursor positions (multi-cursor aware).
     /// Builds a single transaction with inserts at all cursor offsets (sorted ascending).
     fn insertAtAllCursors(key: int) void {
-        // Collect cursor offsets sorted (selection ranges are already sorted by from())
         const range_count = self.document.selection.ranges.count
         if (range_count == 0) { return }
-        // Build changeset: for each cursor, retain(gap), insert(key)
         var cs = ChangeSet.init()
         var prev_offset: i64 = 0
         var i: i64 = 0
@@ -776,7 +759,7 @@ struct Surface {
             const pos = r.head
             const gap = pos - prev_offset
             if (gap > 0) { cs.retain(gap) }
-            cs.insertByte(key)
+            cs.insertCodepoint(key)
             prev_offset = pos
             i += 1
         }
@@ -784,16 +767,16 @@ struct Surface {
         if (rest > 0) { cs.retain(rest) }
         var txn = Transaction { changes: cs }
         const cursor_before = self.cursor.offset
-        self.document.apply(txn, cursor_before, cursor_before + 1)
+        const key_bytes = utf8CodepointLen(key)
+        self.applyEdit(txn, cursor_before, cursor_before + key_bytes)
         self.syncCursorFromPrimary()
     }
 
-    /// Delete one character backward at ALL cursor positions (multi-cursor aware).
+    /// Delete one codepoint backward at ALL cursor positions (multi-cursor aware).
     /// Builds a single transaction with deletes at all cursor offsets.
     fn deleteBackAtAllCursors() void {
         const range_count = self.document.selection.ranges.count
         if (range_count == 0) { return }
-        // Build changeset: for each cursor, retain(gap), delete(1)
         var cs = ChangeSet.init()
         var prev_offset: i64 = 0
         var any_deleted = false
@@ -802,9 +785,11 @@ struct Surface {
             const r = self.document.selection.ranges.get(i)
             const pos = r.head
             if (pos > 0) {
-                const gap = (pos - 1) - prev_offset
+                const cp_start = prevCodepointStart(&self.document.buffer, pos)
+                const cp_len = pos - cp_start
+                const gap = cp_start - prev_offset
                 if (gap > 0) { cs.retain(gap) }
-                cs.delete(1)
+                cs.delete(cp_len)
                 prev_offset = pos
                 any_deleted = true
             }
@@ -815,13 +800,12 @@ struct Surface {
         if (rest > 0) { cs.retain(rest) }
         var txn = Transaction { changes: cs }
         const cursor_before = self.cursor.offset
-        var cursor_after = cursor_before
-        if (cursor_before > 0) { cursor_after = cursor_before - 1 }
-        self.document.apply(txn, cursor_before, cursor_after)
+        var cursor_after = prevCodepointStart(&self.document.buffer, cursor_before)
+        self.applyEdit(txn, cursor_before, cursor_after)
         self.syncCursorFromPrimary()
     }
 
-    /// Delete one character forward at ALL cursor positions (multi-cursor aware).
+    /// Delete one codepoint forward at ALL cursor positions (multi-cursor aware).
     fn deleteForwardAtAllCursors() void {
         const range_count = self.document.selection.ranges.count
         if (range_count == 0) { return }
@@ -834,10 +818,11 @@ struct Surface {
             const r = self.document.selection.ranges.get(i)
             const pos = r.head
             if (pos < buf_len) {
+                const cp_len = utf8ByteLen(self.document.buffer.charAt(pos))
                 const gap = pos - prev_offset
                 if (gap > 0) { cs.retain(gap) }
-                cs.delete(1)
-                prev_offset = pos + 1
+                cs.delete(cp_len)
+                prev_offset = pos + cp_len
                 any_deleted = true
             }
             i += 1
@@ -847,7 +832,7 @@ struct Surface {
         if (rest > 0) { cs.retain(rest) }
         var txn = Transaction { changes: cs }
         const cursor_before = self.cursor.offset
-        self.document.apply(txn, cursor_before, cursor_before)
+        self.applyEdit(txn, cursor_before, cursor_before)
         self.syncCursorFromPrimary()
     }
 
@@ -969,7 +954,7 @@ struct Surface {
         const rest = self.document.buffer.len() - to
         if (rest > 0) { cs.retain(rest) }
         var txn = Transaction { changes: cs }
-        self.document.apply(txn, cursor_before, from)
+        self.applyEdit(txn, cursor_before, from)
         self.cursor.offset = from
         self.recomputeLineCol()
     }
@@ -1108,7 +1093,7 @@ struct Surface {
         if (rest > 0) { cs.retain(rest) }
         var txn = Transaction { changes: cs }
         const cursor_after = insert_at + paste_buf.count
-        self.document.apply(txn, cursor_before, cursor_after)
+        self.applyEdit(txn, cursor_before, cursor_after)
         self.cursor.offset = cursor_after
         self.recomputeLineCol()
         self.document.selection = Selection.point(self.cursor.offset)
@@ -1132,7 +1117,7 @@ struct Surface {
         const rest = self.document.buffer.len() - to
         if (rest > 0) { cs.retain(rest) }
         var txn = Transaction { changes: cs }
-        self.document.apply(txn, cursor_before, to + 2)
+        self.applyEdit(txn, cursor_before, to + 2)
         // Update selection to cover the wrapped text (between brackets)
         self.document.selection = Selection.init(from + 1, to + 1)
         self.cursor.offset = to + 1
@@ -1203,9 +1188,252 @@ struct Surface {
         const rest = self.document.buffer.len() - cursor_before
         if (rest > 0) { cs.retain(rest) }
         var txn = Transaction { changes: cs }
-        self.document.apply(txn, cursor_before, cursor_after)
+        self.applyEdit(txn, cursor_before, cursor_after)
         self.cursor.offset = cursor_after
         self.recomputeLineCol()
+    }
+
+    /// Apply a transaction and update the scroll anchor through the changeset.
+    /// This keeps the viewport stable when edits happen above the visible area.
+    fn applyEdit(txn: Transaction, cursor_before: int, cursor_after: int) void {
+        self.document.apply(txn, cursor_before, cursor_after)
+        // Map scroll anchor through the changeset (ASSOC_BEFORE: stay at same visual position)
+        self.scroll_anchor = txn.mapPos(self.scroll_anchor, ASSOC_BEFORE)
+        // Recompute scroll_offset from the mapped anchor
+        self.scroll_offset = self.document.buffer.lineFromOffset(self.scroll_anchor)
+    }
+
+    // ========================================================================
+    // Search (Cmd+F)
+    // ========================================================================
+
+    /// Open the search overlay. If text is selected, use it as initial query.
+    fn searchOpen() void {
+        self.search.open()
+        // Populate query from selection if non-empty
+        const primary = self.document.selection.primary()
+        if (!primary.isEmpty()) {
+            self.search.query.count = 0
+            self.search.query_cursor = 0
+            const from = primary.from()
+            const to = primary.to()
+            var i = from
+            while (i < to) {
+                self.search.query.append(@intCast(u8, self.document.buffer.charAt(i)))
+                i += 1
+            }
+            self.search.query_cursor = self.search.query.count
+            self.search.dirty = true
+        }
+        self.searchUpdate()
+    }
+
+    /// Close the search overlay.
+    fn searchClose() void {
+        self.search.close()
+    }
+
+    /// Handle a key event while search overlay is active.
+    /// Returns true if the key was consumed, false if it should pass through.
+    fn handleSearchKey(key: int, mods: int) bool {
+        const has_ctrl = (mods & MOD_CTRL) != 0
+        const has_shift = (mods & MOD_SHIFT) != 0
+        const has_super = (mods & MOD_SUPER) != 0
+
+        // Escape — close search
+        if (key == KEY_ESCAPE) {
+            self.searchClose()
+            return true
+        }
+
+        // Enter — next match (Shift+Enter = prev)
+        if (key == KEY_ENTER) {
+            if (has_shift) {
+                self.search.prevMatch()
+            } else {
+                self.search.nextMatch()
+            }
+            self.searchJumpToMatch()
+            return true
+        }
+
+        // Tab — toggle focus between query and replace
+        if (key == KEY_TAB) {
+            if (self.search.replace_active) {
+                self.search.toggleFocus()
+            }
+            return true
+        }
+
+        // Arrow keys
+        if (key == KEY_ARROW_LEFT) {
+            self.search.moveCursorLeft()
+            return true
+        }
+        if (key == KEY_ARROW_RIGHT) {
+            self.search.moveCursorRight()
+            return true
+        }
+        // Up/Down — navigate matches
+        if (key == KEY_ARROW_UP) {
+            self.search.prevMatch()
+            self.searchJumpToMatch()
+            return true
+        }
+        if (key == KEY_ARROW_DOWN) {
+            self.search.nextMatch()
+            self.searchJumpToMatch()
+            return true
+        }
+
+        // Home/End
+        if (key == KEY_HOME or (has_super and key == KEY_ARROW_LEFT)) {
+            self.search.moveCursorHome()
+            return true
+        }
+        if (key == KEY_END or (has_super and key == KEY_ARROW_RIGHT)) {
+            self.search.moveCursorEnd()
+            return true
+        }
+
+        // Backspace
+        if (key == KEY_BACKSPACE) {
+            self.search.deleteBack()
+            if (self.search.dirty) { self.searchUpdate() }
+            return true
+        }
+        // Delete
+        if (key == KEY_DELETE) {
+            self.search.deleteForward()
+            if (self.search.dirty) { self.searchUpdate() }
+            return true
+        }
+
+        // Cmd+Shift+H — toggle replace
+        if (has_super and has_shift and key == 'H') {
+            self.search.toggleReplace()
+            return true
+        }
+
+        // Ctrl+Shift+C — toggle case sensitivity
+        if (has_ctrl and has_shift and key == 'C') {
+            self.search.toggleCaseSensitive()
+            self.searchUpdate()
+            return true
+        }
+
+        // Cmd+G / Cmd+Shift+G — next/prev match (Zed keybindings)
+        if (has_super and !has_ctrl and key == 'g') {
+            if (has_shift) {
+                self.search.prevMatch()
+            } else {
+                self.search.nextMatch()
+            }
+            self.searchJumpToMatch()
+            return true
+        }
+        if (has_super and !has_ctrl and key == 'G') {
+            self.search.prevMatch()
+            self.searchJumpToMatch()
+            return true
+        }
+
+        // Printable characters
+        if (key >= 32 and key <= 126 and !has_ctrl and !has_super) {
+            self.search.insertChar(key)
+            if (self.search.dirty) { self.searchUpdate() }
+            return true
+        }
+
+        return false
+    }
+
+    /// Re-run the search and select the nearest match.
+    fn searchUpdate() void {
+        findAllMatches(&self.search.matches, &self.document.buffer, &self.search.query, self.search.case_sensitive)
+        self.search.dirty = false
+        if (self.search.matches.count > 0) {
+            self.search.current_match = findNearestMatch(&self.search.matches, self.cursor.offset)
+            self.searchJumpToMatch()
+        } else {
+            self.search.current_match = -1
+        }
+    }
+
+    /// Jump the cursor to the current match and scroll it into view.
+    fn searchJumpToMatch() void {
+        const m = self.search.currentMatchRange()
+        if (m.start < 0) { return }
+        self.cursor.offset = m.start
+        self.recomputeLineCol()
+        // Select the match text
+        self.document.selection = Selection.init(m.start, m.end)
+    }
+
+    /// Replace the current match with the replacement text.
+    fn searchReplaceCurrent() void {
+        const m = self.search.currentMatchRange()
+        if (m.start < 0) { return }
+        const match_len = m.end - m.start
+        const cursor_before = self.cursor.offset
+        // Build changeset: retain(start), delete(match_len), insert(replace), retain(rest)
+        var cs = ChangeSet.init()
+        if (m.start > 0) { cs.retain(m.start) }
+        cs.delete(match_len)
+        // Insert replacement text
+        var ri = 0
+        while (ri < self.search.replace_text.count) {
+            cs.insertByte(self.search.replace_text.get(ri))
+            ri += 1
+        }
+        const rest = self.document.buffer.len() - m.end
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        self.document.history.breakGroup()
+        self.applyEdit(txn, cursor_before, m.start + self.search.replace_text.count)
+        self.cursor.offset = m.start + self.search.replace_text.count
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+        // Re-search after replacement
+        self.searchUpdate()
+    }
+
+    /// Replace all matches with the replacement text.
+    fn searchReplaceAll() void {
+        if (self.search.matches.count == 0) { return }
+        if (self.search.query.count == 0) { return }
+        const cursor_before = self.cursor.offset
+        self.document.history.breakGroup()
+        // Build single transaction for all replacements
+        var changes: List(Change) = .{}
+        var i = 0
+        while (i < self.search.matches.count) {
+            const m = self.search.matches.get(i)
+            // Build replacement string from replace_text List
+            var replace_str: List(u8) = .{}
+            var ri = 0
+            while (ri < self.search.replace_text.count) {
+                replace_str.append(self.search.replace_text.get(ri))
+                ri += 1
+            }
+            changes.append(Change {
+                from: m.start,
+                to: m.end,
+                text: @string(replace_str.items, replace_str.count),
+            })
+            i += 1
+        }
+        var txn = Transaction.fromChanges(self.document.buffer.len(), &changes)
+        self.applyEdit(txn, cursor_before, cursor_before)
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+        // Re-search (should find 0 matches now)
+        self.searchUpdate()
+    }
+
+    /// Whether the search overlay is active (for FFI query).
+    fn isSearchActive() bool {
+        return self.search.active
     }
 
     /// Perform undo via Document, update cursor.
@@ -1273,7 +1501,7 @@ struct Surface {
     /// Scroll to keep cursor visible, with scrolloff margin.
     fn ensureCursorInView() void {
         const scrolloff: i64 = 5
-        const content_rows = self.viewport_rows
+        const content_rows = self.viewport_rows - self.search.overlayRows()
         if (content_rows <= 0) { return }
         if (self.cursor.line < self.scroll_offset + scrolloff) {
             self.scroll_offset = self.cursor.line - scrolloff
@@ -1316,6 +1544,152 @@ struct Surface {
         return width
     }
 
+    /// Render search overlay bar at top of editor grid.
+    /// Row 0: "Find: [query]    N/M  Aa"
+    /// Row 1 (if replace active): "Replace: [text]"
+    fn renderSearchOverlay(overlay_rows: i64) void {
+        // Search bar background — slightly lighter than editor bg
+        var bar_bg_r = THEME_BG_R + 30
+        var bar_bg_g = THEME_BG_G + 30
+        var bar_bg_b = THEME_BG_B + 30
+        if (bar_bg_r > 255) { bar_bg_r = 255 }
+        if (bar_bg_g > 255) { bar_bg_g = 255 }
+        if (bar_bg_b > 255) { bar_bg_b = 255 }
+
+        // Row 0: Find row
+        self.gridFillBg(0, 0, self.viewport_cols, bar_bg_r, bar_bg_g, bar_bg_b)
+        var col: i64 = 1
+        col = self.gridWriteStr(0, col, "Find: ", THEME_FG_R, THEME_FG_G, THEME_FG_B)
+        const query_start_col = col
+        // Write query text from List(u8)
+        var qi: i64 = 0
+        while (qi < self.search.query.count) {
+            if (col >= self.viewport_cols - 15) { break }  // leave room for match count
+            const ch: i64 = self.search.query.get(qi)
+            const c = self.render_grid.getCell(0, col)
+            c.codepoint = ch
+            c.fg_type = COLOR_RGB
+            c.fg_val = packRgb(THEME_FG_R, THEME_FG_G, THEME_FG_B)
+            col += 1
+            qi += 1
+        }
+        // Mark cursor position in query field
+        if (self.search.focus == SearchFocus.Query) {
+            const cursor_col = query_start_col + self.search.query_cursor
+            if (cursor_col >= 0 and cursor_col < self.viewport_cols) {
+                const cc = self.render_grid.getCell(0, cursor_col)
+                cc.flags = cc.flags | CELL_CURSOR
+            }
+        }
+        // Match count "N/M" at right side
+        if (self.search.matches.count > 0) {
+            var match_sb: StringBuilder = .{}
+            if (self.search.current_match >= 0) {
+                match_sb.appendInt(self.search.current_match + 1)
+            } else {
+                match_sb.append("0")
+            }
+            match_sb.append("/")
+            match_sb.appendInt(self.search.matches.count)
+            const match_str = match_sb.toString()
+            const match_col = self.viewport_cols - match_str.len - 2
+            if (match_col > col) {
+                self.gridWriteStr(0, match_col, match_str, 180, 180, 190)
+            }
+        } else if (self.search.query.count > 0) {
+            // No matches found
+            const no_col = self.viewport_cols - 12
+            if (no_col > col) {
+                self.gridWriteStr(0, no_col, "No results", 180, 100, 100)
+            }
+        }
+        // Case sensitivity indicator
+        if (self.search.case_sensitive) {
+            const aa_col = self.viewport_cols - 15
+            if (aa_col > col) {
+                self.gridWriteStr(0, aa_col, "Aa", 130, 180, 130)
+            }
+        }
+
+        // Row 1: Replace row (if active)
+        if (overlay_rows >= 2) {
+            self.gridFillBg(1, 0, self.viewport_cols, bar_bg_r, bar_bg_g, bar_bg_b)
+            var rcol: i64 = 1
+            rcol = self.gridWriteStr(1, rcol, "Replace: ", THEME_FG_R, THEME_FG_G, THEME_FG_B)
+            const replace_start_col = rcol
+            // Write replace text from List(u8)
+            var ri: i64 = 0
+            while (ri < self.search.replace_text.count) {
+                if (rcol >= self.viewport_cols - 2) { break }
+                const rch: i64 = self.search.replace_text.get(ri)
+                const rc = self.render_grid.getCell(1, rcol)
+                rc.codepoint = rch
+                rc.fg_type = COLOR_RGB
+                rc.fg_val = packRgb(THEME_FG_R, THEME_FG_G, THEME_FG_B)
+                rcol += 1
+                ri += 1
+            }
+            // Mark cursor position in replace field
+            if (self.search.focus == SearchFocus.Replace) {
+                const rcursor_col = replace_start_col + self.search.replace_cursor
+                if (rcursor_col >= 0 and rcursor_col < self.viewport_cols) {
+                    const rcc = self.render_grid.getCell(1, rcursor_col)
+                    rcc.flags = rcc.flags | CELL_CURSOR
+                }
+            }
+        }
+    }
+
+    /// Mark cells that fall within search matches with CELL_SEARCH_MATCH flag.
+    /// The current match gets both CELL_SEARCH_MATCH and CELL_SELECTED for brighter highlight.
+    fn renderSearchMatches(gutter_w: i64, row_offset: i64, content_rows: i64) void {
+        var mi: i64 = 0
+        while (mi < self.search.matches.count) {
+            const m = self.search.matches.get(mi)
+            const is_current = (mi == self.search.current_match)
+            // Convert match start/end to lines
+            const from_line = self.offsetToLine(m.start)
+            const to_line = self.offsetToLine(m.end - 1)  // end is exclusive
+            var line = from_line
+            while (line <= to_line) {
+                const screen_row = line - self.scroll_offset + row_offset
+                if (screen_row < row_offset) { line += 1; continue }
+                if (screen_row >= self.viewport_rows) { break }
+                const line_start = self.document.buffer.lineStartOffset(line)
+                const line_len = self.document.buffer.lineLength(line)
+                // Determine char range within this line
+                var start_col: i64 = 0
+                if (line == from_line) {
+                    start_col = m.start - line_start
+                }
+                var end_col = line_len
+                if (line == to_line) {
+                    end_col = m.end - line_start
+                }
+                // Mark cells
+                var col = start_col
+                while (col < end_col) {
+                    const screen_col = gutter_w + col - self.h_scroll_offset
+                    if (screen_col >= 0 and screen_col < self.viewport_cols) {
+                        const c = self.render_grid.getCell(screen_row, screen_col)
+                        c.flags = c.flags | CELL_SEARCH_MATCH
+                        // Highlight current match more prominently
+                        if (is_current) {
+                            c.bg_type = COLOR_RGB
+                            c.bg_val = packRgb(200, 150, 30)
+                        } else {
+                            c.bg_type = COLOR_RGB
+                            c.bg_val = packRgb(120, 90, 0)
+                        }
+                    }
+                    col += 1
+                }
+                line += 1
+            }
+            mi += 1
+        }
+    }
+
     /// Render the entire editor grid: gutter, content, cursor.
     fn renderEditorGrid() void {
         if (self.viewport_rows <= 0 or self.viewport_cols <= 0) { return }
@@ -1335,28 +1709,40 @@ struct Surface {
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
         const content_cols = self.viewport_cols - gutter_w
-        const content_rows = self.viewport_rows
+        const overlay_rows = self.search.overlayRows()
+        const content_rows = self.viewport_rows - overlay_rows
 
-        // Render each visible line
+        // Search overlay at top of grid
+        if (overlay_rows > 0) {
+            self.renderSearchOverlay(overlay_rows)
+        }
+
+        // Render each visible line (offset by overlay)
         for row in 0..content_rows {
+            const screen_row = row + overlay_rows
             const doc_line = self.scroll_offset + row
             if (doc_line >= total_lines) { break }
 
             // Line number (right-aligned in gutter)
-            self.renderLineNumber(row, doc_line, gutter_w)
+            self.renderLineNumber(screen_row, doc_line, gutter_w)
 
             // Buffer text content
-            self.renderLineContent(row, doc_line, gutter_w, content_cols)
+            self.renderLineContent(screen_row, doc_line, gutter_w, content_cols)
+        }
+
+        // Search match highlights
+        if (self.search.active and self.search.matches.count > 0) {
+            self.renderSearchMatches(gutter_w, overlay_rows, content_rows)
         }
 
         // Selection highlight
-        self.renderSelection()
+        self.renderSelection(overlay_rows)
 
         // Cursor positions (all selection range heads)
-        self.renderCursors(gutter_w)
+        self.renderCursors(gutter_w, overlay_rows)
 
         // Bracket match highlight
-        self.renderBracketMatch(gutter_w)
+        self.renderBracketMatch(gutter_w, overlay_rows)
     }
 
     /// Render a right-aligned line number in the gutter.
@@ -1422,7 +1808,7 @@ struct Surface {
 
     /// Set CELL_SELECTED flag on cells that fall within selection ranges.
     /// Called after content rendering in renderEditorGrid().
-    fn renderSelection() void {
+    fn renderSelection(row_offset: i64) void {
         const total_lines = self.document.buffer.lineCount()
         const gutter_w = self.gutterWidth(total_lines)
         var i: i64 = 0
@@ -1439,8 +1825,8 @@ struct Surface {
             // Iterate visible lines in range
             var line = from_line
             while (line <= to_line) {
-                const screen_row = line - self.scroll_offset
-                if (screen_row < 0) { line += 1; continue }
+                const screen_row = line - self.scroll_offset + row_offset
+                if (screen_row < row_offset) { line += 1; continue }
                 if (screen_row >= self.viewport_rows) { break }
                 const line_len = self.document.buffer.lineLength(line)
                 var start_col: i64 = 0
@@ -1465,7 +1851,7 @@ struct Surface {
 
     /// Mark all cursor positions (selection range heads) with CELL_CURSOR flag.
     /// Only marks when cursor_visible is true (controlled by blink timer).
-    fn renderCursors(gutter_w: i64) void {
+    fn renderCursors(gutter_w: i64, row_offset: i64) void {
         if (!self.cursor_visible) { return }
         var i: i64 = 0
         while (i < self.document.selection.ranges.count) {
@@ -1473,7 +1859,7 @@ struct Surface {
             const head = r.head
             const cursor_line = self.offsetToLine(head)
             const cursor_col = head - self.document.buffer.lineStartOffset(cursor_line)
-            const screen_row = cursor_line - self.scroll_offset
+            const screen_row = cursor_line - self.scroll_offset + row_offset
             if (screen_row >= 0 and screen_row < self.viewport_rows) {
                 const screen_col = gutter_w + cursor_col - self.h_scroll_offset
                 if (screen_col >= 0 and screen_col < self.viewport_cols) {
@@ -1487,7 +1873,7 @@ struct Surface {
 
     /// Highlight matching bracket at cursor position.
     /// Scans forward for opening brackets, backward for closing brackets.
-    fn renderBracketMatch(gutter_w: i64) void {
+    fn renderBracketMatch(gutter_w: i64, row_offset: i64) void {
         const buf_len = self.document.buffer.len()
         if (buf_len == 0) { return }
         // Check char at cursor and char before cursor for brackets
@@ -1539,17 +1925,17 @@ struct Surface {
         }
         if (match_pos < 0) { return }
         // Mark both brackets in render grid
-        self.markBracketCell(bracket_pos, gutter_w)
-        self.markBracketCell(match_pos, gutter_w)
+        self.markBracketCell(bracket_pos, gutter_w, row_offset)
+        self.markBracketCell(match_pos, gutter_w, row_offset)
     }
 
     /// Mark a single buffer offset as bracket match in the render grid.
-    fn markBracketCell(buf_offset: int, gutter_w: i64) void {
+    fn markBracketCell(buf_offset: int, gutter_w: i64, row_offset: i64) void {
         // Convert offset to line/col
         const line = self.offsetToLine(buf_offset)
         const col = buf_offset - self.document.buffer.lineStartOffset(line)
         // Convert to screen coordinates
-        const screen_row = line - self.scroll_offset
+        const screen_row = line - self.scroll_offset + row_offset
         const screen_col = gutter_w + col - self.h_scroll_offset
         if (screen_row >= 0 and screen_row < self.viewport_rows) {
             if (screen_col >= 0 and screen_col < self.viewport_cols) {

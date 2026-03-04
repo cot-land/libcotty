@@ -2084,3 +2084,83 @@ export fn cotty_filetree_row_path_len(tree: i64, row: i64) i64 {
     return getFileTreePtr(tree).rowPath(row)
 }
 
+// ============================================================================
+// Search & Replace
+// ============================================================================
+
+/// Open the search overlay for an editor surface.
+export fn cotty_editor_search_open(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.searchOpen()
+    if (ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Close the search overlay.
+export fn cotty_editor_search_close(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.searchClose()
+    if (ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Send a key event to the search overlay.
+/// Returns 1 if the key was consumed, 0 if it should be handled by the editor.
+export fn cotty_editor_search_key(surface: i64, key: i64, mods: i64) i64 {
+    const ptr = getSurfacePtr(surface)
+    if (!ptr.isSearchActive()) { return 0 }
+    const consumed = ptr.handleSearchKey(key, mods)
+    if (consumed) {
+        if (ptr.viewport_rows > 0) {
+            ptr.ensureCursorInView()
+            ptr.renderEditorGrid()
+        }
+        return 1
+    }
+    return 0
+}
+
+/// Return 1 if the search overlay is active, 0 otherwise.
+export fn cotty_editor_search_active(surface: i64) i64 {
+    if (getSurfacePtr(surface).isSearchActive()) { return 1 }
+    return 0
+}
+
+/// Toggle the replace field in the search overlay.
+export fn cotty_editor_search_toggle_replace(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.search.toggleReplace()
+    if (ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Replace the current search match.
+export fn cotty_editor_search_replace(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.searchReplaceCurrent()
+    if (ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+    g_action_tag = ACTION_MARK_DIRTY
+    g_action_surface = surface
+}
+
+/// Replace all search matches.
+export fn cotty_editor_search_replace_all(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.searchReplaceAll()
+    if (ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+    g_action_tag = ACTION_MARK_DIRTY
+    g_action_surface = surface
+}
+

@@ -128,6 +128,25 @@ struct ChangeSet {
         self.len_after += ins_text.len
     }
 
+    /// Insert a Unicode codepoint encoded as UTF-8 (1-4 bytes).
+    fn insertCodepoint(cp: int) void {
+        if (cp < 0x80) {
+            self.insertByte(cp)
+        } else if (cp < 0x800) {
+            self.insertByte(0xC0 | (cp >> 6))
+            self.insertByte(0x80 | (cp & 0x3F))
+        } else if (cp < 0x10000) {
+            self.insertByte(0xE0 | (cp >> 12))
+            self.insertByte(0x80 | ((cp >> 6) & 0x3F))
+            self.insertByte(0x80 | (cp & 0x3F))
+        } else {
+            self.insertByte(0xF0 | (cp >> 18))
+            self.insertByte(0x80 | ((cp >> 12) & 0x3F))
+            self.insertByte(0x80 | ((cp >> 6) & 0x3F))
+            self.insertByte(0x80 | (cp & 0x3F))
+        }
+    }
+
     /// Add an insert operation for a single byte.
     fn insertByte(b: int) void {
         const text_off = self.text.count
