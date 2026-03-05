@@ -601,6 +601,76 @@ struct Surface {
                     self.document.selection = Selection.point(self.cursor.offset)
                 }
             },
+            InputAction.delete_word_backward => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 2
+                // Delete any selection first
+                const primary_dwb = self.document.selection.primary()
+                if (!primary_dwb.isEmpty()) {
+                    self.deleteSelection()
+                    self.document.selection = Selection.point(self.cursor.offset)
+                    return
+                }
+                self.deleteWordBackward()
+            },
+            InputAction.delete_word_forward => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 2
+                const primary_dwf = self.document.selection.primary()
+                if (!primary_dwf.isEmpty()) {
+                    self.deleteSelection()
+                    self.document.selection = Selection.point(self.cursor.offset)
+                    return
+                }
+                self.deleteWordForward()
+            },
+            InputAction.delete_line => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 2
+                self.deleteLine()
+            },
+            InputAction.move_line_up => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
+                self.moveLineUp()
+            },
+            InputAction.move_line_down => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
+                self.moveLineDown()
+            },
+            InputAction.duplicate_line => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
+                self.duplicateLine()
+            },
+            InputAction.join_lines => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
+                self.joinLines()
+            },
+            InputAction.indent_selection => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
+                self.indentSelection()
+            },
+            InputAction.outdent_selection => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
+                self.outdentSelection()
+            },
+            InputAction.select_line => {
+                self.selectLine()
+            },
             else => {},
         }
     }
@@ -881,6 +951,412 @@ struct Surface {
         const cursor_before = self.cursor.offset
         self.applyEdit(txn, cursor_before, cursor_before)
         self.syncCursorFromPrimary()
+    }
+
+    // =====================================================================
+    // Phase 1 Editor Operations
+    // =====================================================================
+
+    /// Delete the word before the cursor (Alt+Backspace).
+    fn deleteWordBackward() void {
+        if (self.cursor.offset == 0) { return }
+        const cursor_before = self.cursor.offset
+        const target = moveWordBackward(&self.document.buffer, cursor_before)
+        const del_len = cursor_before - target
+        if (del_len == 0) { return }
+        var cs = ChangeSet.init()
+        if (target > 0) { cs.retain(target) }
+        cs.delete(del_len)
+        const rest = self.document.buffer.len() - cursor_before
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        self.applyEdit(txn, cursor_before, target)
+        self.cursor.offset = target
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Delete the word after the cursor (Alt+Delete).
+    fn deleteWordForward() void {
+        const buf_len = self.document.buffer.len()
+        if (self.cursor.offset >= buf_len) { return }
+        const cursor_before = self.cursor.offset
+        const target = moveWordForward(&self.document.buffer, cursor_before)
+        const del_len = target - cursor_before
+        if (del_len == 0) { return }
+        var cs = ChangeSet.init()
+        if (cursor_before > 0) { cs.retain(cursor_before) }
+        cs.delete(del_len)
+        const rest = buf_len - target
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        self.applyEdit(txn, cursor_before, cursor_before)
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Delete the current line (Cmd+Shift+K).
+    fn deleteLine() void {
+        const buf_len = self.document.buffer.len()
+        if (buf_len == 0) { return }
+        const line = self.cursor.line
+        const line_start = self.document.buffer.lineStartOffset(line)
+        const line_len = self.document.buffer.lineLength(line)
+        const total_lines = self.document.buffer.lineCount()
+        // Calculate range to delete: line content + newline (or preceding newline if last line)
+        var del_start = line_start
+        var del_end = line_start + line_len
+        if (del_end < buf_len and self.document.buffer.charAt(del_end) == '\n') {
+            // Not the last line — include trailing newline
+            del_end += 1
+        } else if (del_start > 0) {
+            // Last line — include preceding newline
+            del_start -= 1
+        }
+        const del_len = del_end - del_start
+        if (del_len == 0) { return }
+        var cs = ChangeSet.init()
+        if (del_start > 0) { cs.retain(del_start) }
+        cs.delete(del_len)
+        const rest = buf_len - del_end
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        // Place cursor at same column on next line (or line above if last)
+        const goal_col = self.cursor.col
+        self.applyEdit(txn, self.cursor.offset, del_start)
+        self.cursor.offset = del_start
+        self.recomputeLineCol()
+        // Clamp to new line length
+        const new_line_len = self.document.buffer.lineLength(self.cursor.line)
+        if (self.cursor.col > new_line_len) {
+            self.cursor.col = new_line_len
+        } else if (goal_col <= new_line_len) {
+            self.cursor.col = goal_col
+        }
+        self.cursor.offset = self.document.buffer.lineStartOffset(self.cursor.line) + self.cursor.col
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Move the current line up (Alt+Up).
+    fn moveLineUp() void {
+        const line = self.cursor.line
+        if (line == 0) { return }
+        const buf_len = self.document.buffer.len()
+        // Current line range
+        const cur_start = self.document.buffer.lineStartOffset(line)
+        const cur_len = self.document.buffer.lineLength(line)
+        // Previous line range
+        const prev_start = self.document.buffer.lineStartOffset(line - 1)
+        const prev_len = self.document.buffer.lineLength(line - 1)
+        // Extract current line text
+        var cur_text: List(u8) = .{}
+        var ci: i64 = 0
+        while (ci < cur_len) {
+            cur_text.append(@intCast(u8, self.document.buffer.charAt(cur_start + ci)))
+            ci += 1
+        }
+        // Extract previous line text
+        var prev_text: List(u8) = .{}
+        var pi: i64 = 0
+        while (pi < prev_len) {
+            prev_text.append(@intCast(u8, self.document.buffer.charAt(prev_start + pi)))
+            pi += 1
+        }
+        // Build changeset: replace [prev_line\ncur_line] with [cur_line\nprev_line]
+        var cs = ChangeSet.init()
+        if (prev_start > 0) { cs.retain(prev_start) }
+        // Delete both lines + the newline between them
+        const total_del = prev_len + 1 + cur_len
+        cs.delete(total_del)
+        // Insert current line, newline, previous line
+        cs.insert(@string(cur_text.items, cur_text.count))
+        cs.insertByte('\n')
+        cs.insert(@string(prev_text.items, prev_text.count))
+        // Handle trailing newline or rest of buffer
+        const after_cur = cur_start + cur_len
+        if (after_cur < buf_len and self.document.buffer.charAt(after_cur) == '\n') {
+            // Cur line had a trailing newline — it's already accounted for by the structure
+            const rest = buf_len - after_cur
+            if (rest > 0) { cs.retain(rest) }
+        } else {
+            // Last line, no trailing newline
+            const rest = buf_len - (prev_start + total_del)
+            if (rest > 0) { cs.retain(rest) }
+        }
+        var txn = Transaction { changes: cs }
+        const goal_col = self.cursor.col
+        self.applyEdit(txn, self.cursor.offset, prev_start + goal_col)
+        self.cursor.offset = prev_start + goal_col
+        self.recomputeLineCol()
+        // Clamp column
+        const new_line_len = self.document.buffer.lineLength(self.cursor.line)
+        if (self.cursor.col > new_line_len) {
+            self.cursor.col = new_line_len
+            self.cursor.offset = self.document.buffer.lineStartOffset(self.cursor.line) + self.cursor.col
+        }
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Move the current line down (Alt+Down).
+    fn moveLineDown() void {
+        const line = self.cursor.line
+        const total_lines = self.document.buffer.lineCount()
+        if (line >= total_lines - 1) { return }
+        const buf_len = self.document.buffer.len()
+        // Current line range
+        const cur_start = self.document.buffer.lineStartOffset(line)
+        const cur_len = self.document.buffer.lineLength(line)
+        // Next line range
+        const next_start = self.document.buffer.lineStartOffset(line + 1)
+        const next_len = self.document.buffer.lineLength(line + 1)
+        // Extract current line text
+        var cur_text: List(u8) = .{}
+        var ci: i64 = 0
+        while (ci < cur_len) {
+            cur_text.append(@intCast(u8, self.document.buffer.charAt(cur_start + ci)))
+            ci += 1
+        }
+        // Extract next line text
+        var next_text: List(u8) = .{}
+        var ni: i64 = 0
+        while (ni < next_len) {
+            next_text.append(@intCast(u8, self.document.buffer.charAt(next_start + ni)))
+            ni += 1
+        }
+        // Build changeset: replace [cur_line\nnext_line] with [next_line\ncur_line]
+        var cs = ChangeSet.init()
+        if (cur_start > 0) { cs.retain(cur_start) }
+        // Delete both lines + newline between them
+        const total_del = cur_len + 1 + next_len
+        cs.delete(total_del)
+        // Insert next line, newline, current line
+        cs.insert(@string(next_text.items, next_text.count))
+        cs.insertByte('\n')
+        cs.insert(@string(cur_text.items, cur_text.count))
+        // Rest of buffer after next line
+        const after_next = next_start + next_len
+        const rest = buf_len - after_next
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        const goal_col = self.cursor.col
+        const new_offset = cur_start + next_len + 1 + goal_col
+        self.applyEdit(txn, self.cursor.offset, new_offset)
+        self.cursor.offset = new_offset
+        self.recomputeLineCol()
+        // Clamp column
+        const new_line_len = self.document.buffer.lineLength(self.cursor.line)
+        if (self.cursor.col > new_line_len) {
+            self.cursor.col = new_line_len
+            self.cursor.offset = self.document.buffer.lineStartOffset(self.cursor.line) + self.cursor.col
+        }
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Duplicate the current line (Cmd+Shift+D).
+    fn duplicateLine() void {
+        const line = self.cursor.line
+        const line_start = self.document.buffer.lineStartOffset(line)
+        const line_len = self.document.buffer.lineLength(line)
+        const line_end = line_start + line_len
+        const buf_len = self.document.buffer.len()
+        // Extract line text
+        var line_text: List(u8) = .{}
+        var i: i64 = 0
+        while (i < line_len) {
+            line_text.append(@intCast(u8, self.document.buffer.charAt(line_start + i)))
+            i += 1
+        }
+        // Insert \n + line text after current line end
+        var cs = ChangeSet.init()
+        if (line_end > 0) { cs.retain(line_end) }
+        cs.insertByte('\n')
+        cs.insert(@string(line_text.items, line_text.count))
+        const rest = buf_len - line_end
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        // Move cursor to same column on the new (duplicated) line
+        const new_offset = line_end + 1 + self.cursor.col
+        self.applyEdit(txn, self.cursor.offset, new_offset)
+        self.cursor.offset = new_offset
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Join current line with the next line (Ctrl+J).
+    fn joinLines() void {
+        const line = self.cursor.line
+        const total_lines = self.document.buffer.lineCount()
+        if (line >= total_lines - 1) { return }
+        const buf_len = self.document.buffer.len()
+        const line_start = self.document.buffer.lineStartOffset(line)
+        const line_len = self.document.buffer.lineLength(line)
+        const newline_pos = line_start + line_len
+        if (newline_pos >= buf_len) { return }
+        // Find leading whitespace on next line
+        var ws_len: i64 = 0
+        var scan = newline_pos + 1
+        while (scan < buf_len) {
+            const ch = self.document.buffer.charAt(scan)
+            if (ch != ' ' and ch != '\t') { break }
+            ws_len += 1
+            scan += 1
+        }
+        // Delete newline + leading whitespace, insert single space
+        const del_len = 1 + ws_len
+        var cs = ChangeSet.init()
+        if (newline_pos > 0) { cs.retain(newline_pos) }
+        cs.delete(del_len)
+        cs.insertByte(' ')
+        const rest = buf_len - newline_pos - del_len
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        // Cursor goes to the join point (where the space is)
+        self.applyEdit(txn, self.cursor.offset, newline_pos)
+        self.cursor.offset = newline_pos
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Indent all lines touched by the selection (Tab with selection).
+    fn indentSelection() void {
+        const primary = self.document.selection.primary()
+        const sel_from = primary.from()
+        const sel_to = primary.to()
+        const buf_len = self.document.buffer.len()
+        // Find first and last lines
+        const first_line = self.document.buffer.lineFromOffset(sel_from)
+        var last_line = self.document.buffer.lineFromOffset(sel_to)
+        // If selection ends at start of a line, don't include that line
+        if (sel_to > sel_from and sel_to == self.document.buffer.lineStartOffset(last_line) and last_line > first_line) {
+            last_line -= 1
+        }
+        // Build changeset: for each line, insert 4 spaces at line start
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        var line = first_line
+        while (line <= last_line) {
+            const ls = self.document.buffer.lineStartOffset(line)
+            const gap = ls - prev_offset
+            if (gap > 0) { cs.retain(gap) }
+            cs.insert("    ")
+            prev_offset = ls
+            line += 1
+        }
+        const rest = buf_len - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        const num_lines = last_line - first_line + 1
+        // Adjust selection: expand by 4 bytes per line
+        const new_from = sel_from + 4
+        const new_to = sel_to + num_lines * 4
+        self.applyEdit(txn, self.cursor.offset, new_from)
+        self.document.selection = Selection.init(new_from, new_to)
+        self.cursor.offset = new_to
+        self.recomputeLineCol()
+    }
+
+    /// Outdent all lines touched by the selection (Shift+Tab).
+    fn outdentSelection() void {
+        const primary = self.document.selection.primary()
+        const sel_from = primary.from()
+        const sel_to = primary.to()
+        const buf_len = self.document.buffer.len()
+        const first_line = self.document.buffer.lineFromOffset(sel_from)
+        var last_line = self.document.buffer.lineFromOffset(sel_to)
+        if (sel_to > sel_from and sel_to == self.document.buffer.lineStartOffset(last_line) and last_line > first_line) {
+            last_line -= 1
+        }
+        // Build changeset: for each line, remove up to 4 leading spaces
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        var total_removed: i64 = 0
+        var first_line_removed: i64 = 0
+        var line = first_line
+        while (line <= last_line) {
+            const ls = self.document.buffer.lineStartOffset(line)
+            const ll = self.document.buffer.lineLength(line)
+            // Count leading spaces (up to 4)
+            var spaces: i64 = 0
+            while (spaces < 4 and spaces < ll) {
+                if (self.document.buffer.charAt(ls + spaces) != ' ') { break }
+                spaces += 1
+            }
+            if (spaces > 0) {
+                const gap = ls - prev_offset
+                if (gap > 0) { cs.retain(gap) }
+                cs.delete(spaces)
+                prev_offset = ls + spaces
+                total_removed += spaces
+                if (line == first_line) { first_line_removed = spaces }
+            }
+            line += 1
+        }
+        if (total_removed == 0) { return }
+        const rest = buf_len - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        // Adjust selection
+        var new_from = sel_from - first_line_removed
+        if (new_from < self.document.buffer.lineStartOffset(first_line)) {
+            new_from = self.document.buffer.lineStartOffset(first_line)
+        }
+        const new_to = sel_to - total_removed
+        self.applyEdit(txn, self.cursor.offset, new_from)
+        self.document.selection = Selection.init(new_from, new_to)
+        self.cursor.offset = new_to
+        self.recomputeLineCol()
+    }
+
+    /// Select the current line (Cmd+L). Repeated invocations extend by one line.
+    fn selectLine() void {
+        const buf_len = self.document.buffer.len()
+        if (buf_len == 0) { return }
+        const primary = self.document.selection.primary()
+        const total_lines = self.document.buffer.lineCount()
+        // If already at a full-line selection, extend by one more line
+        const sel_from = primary.from()
+        const sel_to = primary.to()
+        const from_line = self.document.buffer.lineFromOffset(sel_from)
+        const from_line_start = self.document.buffer.lineStartOffset(from_line)
+        if (!primary.isEmpty() and sel_from == from_line_start) {
+            // Selection starts at line start — check if it ends at a line boundary
+            const to_line = self.document.buffer.lineFromOffset(sel_to)
+            const to_line_start = self.document.buffer.lineStartOffset(to_line)
+            if (sel_to == to_line_start or sel_to == buf_len) {
+                // Already a full-line selection — extend to next line
+                if (to_line < total_lines) {
+                    var new_to = buf_len
+                    if (to_line < total_lines - 1) {
+                        new_to = self.document.buffer.lineStartOffset(to_line + 1)
+                    }
+                    self.document.selection = Selection.init(sel_from, new_to)
+                    self.cursor.offset = new_to
+                    self.recomputeLineCol()
+                    return
+                }
+            }
+        }
+        // Select current line (from line start to start of next line)
+        const line = self.cursor.line
+        const line_start = self.document.buffer.lineStartOffset(line)
+        var line_end = line_start + self.document.buffer.lineLength(line)
+        if (line_end < buf_len) { line_end += 1 }  // Include newline
+        self.document.selection = Selection.init(line_start, line_end)
+        self.cursor.offset = line_end
+        self.recomputeLineCol()
+    }
+
+    /// Go to a specific line number (1-indexed, from Cmd+G dialog).
+    fn gotoLine(line_num: int) void {
+        var target = line_num - 1  // Convert to 0-indexed
+        if (target < 0) { target = 0 }
+        const total_lines = self.document.buffer.lineCount()
+        if (target >= total_lines) { target = total_lines - 1 }
+        const offset = self.document.buffer.lineStartOffset(target)
+        self.cursor.offset = offset
+        self.cursor.line = target
+        self.cursor.col = 0
+        self.cursor.clearGoal()
+        self.document.selection = Selection.point(offset)
     }
 
     /// Add a new cursor at the given byte offset.

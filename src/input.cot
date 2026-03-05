@@ -69,6 +69,16 @@ const InputAction = enum(u8) {
     delete_to_line_start,
     select_to_line_start,
     select_to_line_end,
+    indent_selection,
+    outdent_selection,
+    delete_word_backward,
+    delete_word_forward,
+    delete_line,
+    move_line_up,
+    move_line_down,
+    duplicate_line,
+    join_lines,
+    select_line,
 
     /// Return a display name for this action.
     fn name() string {
@@ -119,6 +129,16 @@ const InputAction = enum(u8) {
             .delete_to_line_start => "delete_to_line_start",
             .select_to_line_start => "select_to_line_start",
             .select_to_line_end => "select_to_line_end",
+            .indent_selection => "indent_selection",
+            .outdent_selection => "outdent_selection",
+            .delete_word_backward => "delete_word_backward",
+            .delete_word_forward => "delete_word_forward",
+            .delete_line => "delete_line",
+            .move_line_up => "move_line_up",
+            .move_line_down => "move_line_down",
+            .duplicate_line => "duplicate_line",
+            .join_lines => "join_lines",
+            .select_line => "select_line",
         }
     }
 }
@@ -221,6 +241,7 @@ fn keyToAction(event: KeyEvent) InputAction {
             'w' => InputAction.close_surface,
             'a' => InputAction.move_line_start,
             'e' => InputAction.move_line_end,
+            'j' => InputAction.join_lines,
             else => InputAction.none,
         }
     }
@@ -234,16 +255,20 @@ fn keyToAction(event: KeyEvent) InputAction {
         }
     }
 
-    // Alt+Arrow → word movement
+    // Alt+Arrow → word movement, Alt+Backspace/Delete → word delete, Alt+Up/Down → line move
     if (has_alt and !has_shift and !has_ctrl and !has_super) {
         return switch (event.key) {
             KEY_ARROW_LEFT => InputAction.move_word_backward,
             KEY_ARROW_RIGHT => InputAction.move_word_forward,
+            KEY_ARROW_UP => InputAction.move_line_up,
+            KEY_ARROW_DOWN => InputAction.move_line_down,
+            KEY_BACKSPACE => InputAction.delete_word_backward,
+            KEY_DELETE => InputAction.delete_word_forward,
             else => InputAction.none,
         }
     }
 
-    // Shift+Arrow/Home/End → selection extension
+    // Shift+Arrow/Home/End → selection extension, Shift+Tab → outdent
     if (has_shift and !has_ctrl and !has_alt and !has_super) {
         return switch (event.key) {
             KEY_ARROW_LEFT => InputAction.select_left,
@@ -252,6 +277,7 @@ fn keyToAction(event: KeyEvent) InputAction {
             KEY_ARROW_DOWN => InputAction.select_down,
             KEY_HOME => InputAction.select_line_start,
             KEY_END => InputAction.select_line_end,
+            KEY_TAB => InputAction.outdent_selection,
             else => InputAction.none,
         }
     }

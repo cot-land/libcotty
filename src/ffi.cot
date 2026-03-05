@@ -224,6 +224,17 @@ export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
 
     switch (action) {
         InputAction.insert_char => {
+            // Tab with active selection → indent
+            if (key == 9 and !ptr.document.selection.primary().isEmpty()) {
+                ptr.handleInput(InputAction.indent_selection, 0)
+                g_action_tag = ACTION_MARK_DIRTY
+                g_action_surface = surface
+                if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+                    ptr.ensureCursorInView()
+                    ptr.renderEditorGrid()
+                }
+                return
+            }
             // Tab → 4 spaces
             if (key == 9) {
                 ptr.handleInput(InputAction.insert_char, ' ')
@@ -311,6 +322,55 @@ export fn cotty_surface_key(surface: i64, key: i64, mods: i64) void {
             ptr.handleInput(InputAction.change_selection, 0)
             g_action_tag = ACTION_MARK_DIRTY
             g_action_surface = surface
+        },
+        // Phase 1 editor operations
+        InputAction.delete_word_backward => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.delete_word_forward => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.delete_line => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.move_line_up => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.move_line_down => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.duplicate_line => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.join_lines => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.indent_selection => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.outdent_selection => {
+            ptr.handleInput(action, 0)
+            g_action_tag = ACTION_MARK_DIRTY
+            g_action_surface = surface
+        },
+        InputAction.select_line => {
+            ptr.handleInput(action, 0)
         },
         else => {},
     }
@@ -687,6 +747,56 @@ export fn cotty_editor_add_next_occurrence(surface: i64) void {
 /// Return the number of cursors (selection ranges).
 export fn cotty_editor_cursor_count(surface: i64) i64 {
     return getSurfacePtr(surface).document.selection.ranges.count
+}
+
+/// Go to a specific line number (1-indexed). Called from Swift Cmd+G dialog.
+export fn cotty_editor_goto_line(surface: i64, line_num: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.gotoLine(line_num)
+    if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Delete the current line (Cmd+Shift+K). Called from Swift.
+export fn cotty_editor_delete_line(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.cursor.clearGoal()
+    ptr.document.history.breakGroup()
+    ptr.last_edit_kind = 2
+    ptr.deleteLine()
+    g_action_tag = ACTION_MARK_DIRTY
+    g_action_surface = surface
+    if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Duplicate the current line (Cmd+Shift+D). Called from Swift.
+export fn cotty_editor_duplicate_line(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.cursor.clearGoal()
+    ptr.document.history.breakGroup()
+    ptr.last_edit_kind = 0
+    ptr.duplicateLine()
+    g_action_tag = ACTION_MARK_DIRTY
+    g_action_surface = surface
+    if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Select the current line (Cmd+L). Called from Swift.
+export fn cotty_editor_select_line_action(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.selectLine()
+    if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
 }
 
 // ============================================================================
