@@ -23,6 +23,8 @@ import "selection"
 import "file_tree"
 import "command_palette"
 import "theme_palette"
+import "file_finder"
+import "project_search"
 import "split"
 import "treesitter"
 
@@ -33,6 +35,8 @@ import "treesitter"
 var g_app: App = undefined
 var g_palette: CommandPalette = undefined
 var g_theme_palette: ThemePalette = undefined
+var g_file_finder: FileFinder = undefined
+var g_project_search: ProjectSearch = undefined
 
 /// Split tree storage — kept outside Tab struct to avoid memory layout issues.
 /// Fixed-size parallel arrays: g_split_handles[i] is the tab's primary surface handle,
@@ -143,6 +147,10 @@ export fn cotty_app_new() i64 {
     g_theme_palette = ThemePalette.init()
     g_theme_palette.addTheme(monokaiRemastered())
     g_theme_palette.addTheme(catppuccinMocha())
+
+    // Init file finder and project search
+    g_file_finder = FileFinder.init()
+    g_project_search = ProjectSearch.init()
 
     // Init split tree storage
     g_split_count = 0
@@ -789,6 +797,23 @@ export fn cotty_editor_duplicate_line(surface: i64) void {
     }
 }
 
+/// Prepare buffer for save: trim trailing whitespace, ensure final newline.
+/// Returns 1 if buffer was modified, 0 if unchanged.
+export fn cotty_editor_prepare_save(surface: i64) i64 {
+    const ptr = getSurfacePtr(surface)
+    ptr.document.history.breakGroup()
+    const trimmed = ptr.trimTrailingWhitespace()
+    const newlined = ptr.ensureFinalNewline()
+    if (trimmed or newlined) {
+        if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+            ptr.ensureCursorInView()
+            ptr.renderEditorGrid()
+        }
+        return 1
+    }
+    return 0
+}
+
 /// Select the current line (Cmd+L). Called from Swift.
 export fn cotty_editor_select_line_action(surface: i64) void {
     const ptr = getSurfacePtr(surface)
@@ -797,6 +822,37 @@ export fn cotty_editor_select_line_action(surface: i64) void {
         ptr.ensureCursorInView()
         ptr.renderEditorGrid()
     }
+}
+
+/// Toggle comment on current line or selection (Cmd+/). Called from Swift.
+export fn cotty_editor_toggle_comment(surface: i64) void {
+    const ptr = getSurfacePtr(surface)
+    ptr.cursor.clearGoal()
+    ptr.document.history.breakGroup()
+    ptr.last_edit_kind = 0
+    ptr.toggleComment()
+    g_action_tag = ACTION_MARK_DIRTY
+    g_action_surface = surface
+    if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+        ptr.ensureCursorInView()
+        ptr.renderEditorGrid()
+    }
+}
+
+/// Revert buffer to saved file contents. Called from Swift.
+/// Returns 1 if reverted, 0 if no file path or read failed.
+export fn cotty_editor_revert(surface: i64) i64 {
+    const ptr = getSurfacePtr(surface)
+    ptr.document.history.breakGroup()
+    const reverted = ptr.revertToSaved()
+    if (reverted) {
+        if (ptr.kind == SurfaceKind.Editor and ptr.viewport_rows > 0) {
+            ptr.ensureCursorInView()
+            ptr.renderEditorGrid()
+        }
+        return 1
+    }
+    return 0
 }
 
 // ============================================================================
@@ -1663,8 +1719,8 @@ fn getWorkspacePtr(handle: i64) *Workspace {
 
 /// Create a new workspace. Heap-allocated, returns an opaque handle.
 export fn cotty_workspace_new(app: i64) i64 {
-    const ws = Workspace.init(&g_app)
-    // Allocate on heap and copy
+    var ws = Workspace.init(&g_app)
+    // Allocate on heap and copy — ARC forwards ownership (no manual zeroing needed)
     const ptr = alloc(0, @sizeOf(Workspace))
     const dst = @intToPtr(*Workspace, ptr)
     dst.* = ws
@@ -2137,6 +2193,61 @@ export fn cotty_theme_apply(index: i64) void {
 }
 
 // ============================================================================
+// File Finder
+// ============================================================================
+
+export fn cotty_file_finder_open(root_ptr: i64, root_len: i64) void {
+    g_file_finder.open(@string(root_ptr, root_len))
+}
+
+export fn cotty_file_finder_close() void {
+    g_file_finder.dismiss()
+}
+
+export fn cotty_file_finder_active() i64 {
+    if (g_file_finder.active) { return 1 }
+    return 0
+}
+
+export fn cotty_file_finder_set_query(ptr: *u8, len: i64) void {
+    g_file_finder.setQuery(ptr, len)
+}
+
+export fn cotty_file_finder_result_count() i64 {
+    return g_file_finder.resultCount()
+}
+
+export fn cotty_file_finder_result_name(index: i64) i64 {
+    g_file_finder.resultName(index)
+    return g_file_finder.name_buf.items
+}
+
+export fn cotty_file_finder_result_name_len(index: i64) i64 {
+    return g_file_finder.resultName(index)
+}
+
+export fn cotty_file_finder_result_path(index: i64) i64 {
+    g_file_finder.resultPath(index)
+    return g_file_finder.path_buf.items
+}
+
+export fn cotty_file_finder_result_path_len(index: i64) i64 {
+    return g_file_finder.resultPath(index)
+}
+
+export fn cotty_file_finder_selected() i64 {
+    return g_file_finder.selected
+}
+
+export fn cotty_file_finder_move_up() void {
+    g_file_finder.moveUp()
+}
+
+export fn cotty_file_finder_move_down() void {
+    g_file_finder.moveDown()
+}
+
+// ============================================================================
 // File Tree
 // ============================================================================
 
@@ -2227,6 +2338,114 @@ export fn cotty_filetree_row_path(tree: i64, row: i64) i64 {
 /// Return the byte length of the full path at visible row.
 export fn cotty_filetree_row_path_len(tree: i64, row: i64) i64 {
     return getFileTreePtr(tree).rowPath(row)
+}
+
+// ============================================================================
+// Project Search
+// ============================================================================
+
+export fn cotty_project_search_open(root_ptr: i64, root_len: i64) void {
+    g_project_search.open(@string(root_ptr, root_len))
+}
+
+export fn cotty_project_search_close() void {
+    g_project_search.dismiss()
+}
+
+export fn cotty_project_search_active() i64 {
+    if (g_project_search.active) { return 1 }
+    return 0
+}
+
+export fn cotty_project_search_set_query(ptr: *u8, len: i64) void {
+    g_project_search.setQuery(ptr, len)
+}
+
+export fn cotty_project_search_file_count() i64 {
+    return g_project_search.fileCount()
+}
+
+export fn cotty_project_search_total_matches() i64 {
+    return g_project_search.total_matches
+}
+
+export fn cotty_project_search_flat_count() i64 {
+    return g_project_search.flatCount()
+}
+
+export fn cotty_project_search_selected() i64 {
+    return g_project_search.selected_match
+}
+
+export fn cotty_project_search_move_up() void {
+    g_project_search.moveUp()
+}
+
+export fn cotty_project_search_move_down() void {
+    g_project_search.moveDown()
+}
+
+export fn cotty_project_search_file_rel_path(file_idx: i64) i64 {
+    g_project_search.fileRelPath(file_idx)
+    return g_project_search.path_buf.items
+}
+
+export fn cotty_project_search_file_rel_path_len(file_idx: i64) i64 {
+    return g_project_search.fileRelPath(file_idx)
+}
+
+export fn cotty_project_search_file_full_path(file_idx: i64) i64 {
+    g_project_search.fileFullPath(file_idx)
+    return g_project_search.path_buf.items
+}
+
+export fn cotty_project_search_file_full_path_len(file_idx: i64) i64 {
+    return g_project_search.fileFullPath(file_idx)
+}
+
+export fn cotty_project_search_file_match_count(file_idx: i64) i64 {
+    return g_project_search.fileMatchCount(file_idx)
+}
+
+export fn cotty_project_search_flat_line_num(flat_idx: i64) i64 {
+    return g_project_search.flatLineNum(flat_idx)
+}
+
+export fn cotty_project_search_flat_col(flat_idx: i64) i64 {
+    return g_project_search.flatCol(flat_idx)
+}
+
+export fn cotty_project_search_flat_line_text(flat_idx: i64) i64 {
+    g_project_search.flatLineText(flat_idx)
+    return g_project_search.line_buf.items
+}
+
+export fn cotty_project_search_flat_line_text_len(flat_idx: i64) i64 {
+    return g_project_search.flatLineText(flat_idx)
+}
+
+export fn cotty_project_search_flat_file_index(flat_idx: i64) i64 {
+    return g_project_search.flatFileIndex(flat_idx)
+}
+
+// ============================================================================
+// File Tree Operations
+// ============================================================================
+
+/// Delete the file at the given visible row. Returns 0 on success, -1 on error.
+/// Only deletes files, not directories (no recursive delete in stdlib).
+export fn cotty_filetree_delete(tree: i64, row: i64) i64 {
+    return getFileTreePtr(tree).deleteEntry(row)
+}
+
+/// Create a new file under the directory at the given visible row.
+export fn cotty_filetree_create_file(tree: i64, row: i64, name_ptr: i64, name_len: i64) i64 {
+    return getFileTreePtr(tree).createFileAt(row, @intToPtr(*u8, name_ptr), name_len)
+}
+
+/// Create a new directory under the directory at the given visible row.
+export fn cotty_filetree_create_dir(tree: i64, row: i64, name_ptr: i64, name_len: i64) i64 {
+    return getFileTreePtr(tree).createDirAt(row, @intToPtr(*u8, name_ptr), name_len)
 }
 
 // ============================================================================
