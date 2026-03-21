@@ -257,6 +257,112 @@ struct FileTree {
         return path.len
     }
 
+    /// Delete the entry at the given visible row. Returns 0 on success, -1 on error.
+    /// Only deletes files (not directories — stdlib has no recursive delete).
+    fn deleteEntry(row: i64) i64 {
+        if (row < 0 or row >= self.visible_rows.count) { return -1 }
+        const entry_idx = self.visible_rows.get(row)
+        const entry = self.entries.get(entry_idx)
+        if (entry.is_dir) { return -1 }
+        deleteFile(entry.full_path) catch { return -1 }
+        // Reload parent's children by clearing and re-reading
+        self.reloadParent(entry_idx)
+        return 0
+    }
+
+    /// Create a new file under the directory at visible row (or its parent if row is a file).
+    /// name_ptr/name_len is the new filename. Returns 0 on success, -1 on error.
+    fn createFileAt(row: i64, name_ptr: *u8, name_len: i64) i64 {
+        const dir_path = self.resolveParentDir(row)
+        if (dir_path.len == 0) { return -1 }
+        const name = @string(@ptrToInt(name_ptr), name_len)
+        const full = join(dir_path, name)
+        writeFile(full, "") catch { return -1 }
+        self.reloadDir(row)
+        return 0
+    }
+
+    /// Create a new directory under the directory at visible row (or its parent if row is a file).
+    /// name_ptr/name_len is the new directory name. Returns 0 on success, -1 on error.
+    fn createDirAt(row: i64, name_ptr: *u8, name_len: i64) i64 {
+        const dir_path = self.resolveParentDir(row)
+        if (dir_path.len == 0) { return -1 }
+        const name = @string(@ptrToInt(name_ptr), name_len)
+        const full = join(dir_path, name)
+        makeDir(full) catch { return -1 }
+        self.reloadDir(row)
+        return 0
+    }
+
+    /// Resolve the directory path for creating new items.
+    /// If the row is a directory, returns its path. If a file, returns its parent directory.
+    fn resolveParentDir(row: i64) string {
+        if (row < 0 or row >= self.visible_rows.count) { return self.root_path }
+        const entry = self.entries.get(self.visible_rows.get(row))
+        if (entry.is_dir) { return entry.full_path }
+        // Find parent directory
+        if (entry.parent_index >= 0) {
+            return self.entries.get(entry.parent_index).full_path
+        }
+        return self.root_path
+    }
+
+    /// Reload a directory's children. If row is a file, reload its parent.
+    fn reloadDir(row: i64) void {
+        if (row < 0 or row >= self.visible_rows.count) {
+            // Reload root
+            self.entries.count = 0
+            self.visible_rows.count = 0
+            self.root_first_child = -1
+            self.root_child_count = 0
+            self.loadRootChildren()
+            self.rebuildVisibleRows()
+            return
+        }
+        const entry_idx = self.visible_rows.get(row)
+        const entry = self.entries.get(entry_idx)
+        if (entry.is_dir) {
+            // Mark as not loaded so it reloads on next expand
+            var entry_ptr = @intToPtr(*FileEntry, self.entries.items + entry_idx * @sizeOf(FileEntry))
+            entry_ptr.children_loaded = false
+            entry_ptr.child_count = 0
+            entry_ptr.first_child = -1
+            if (entry_ptr.is_expanded) {
+                self.loadChildren(entry_idx)
+                entry_ptr = @intToPtr(*FileEntry, self.entries.items + entry_idx * @sizeOf(FileEntry))
+                entry_ptr.is_expanded = true
+            }
+            self.rebuildVisibleRows()
+        } else {
+            self.reloadParent(entry_idx)
+        }
+    }
+
+    /// Reload the parent directory of an entry (after delete/create).
+    fn reloadParent(entry_idx: i64) void {
+        const entry = self.entries.get(entry_idx)
+        if (entry.parent_index >= 0) {
+            var parent = @intToPtr(*FileEntry, self.entries.items + entry.parent_index * @sizeOf(FileEntry))
+            parent.children_loaded = false
+            parent.child_count = 0
+            parent.first_child = -1
+            if (parent.is_expanded) {
+                self.loadChildren(entry.parent_index)
+                parent = @intToPtr(*FileEntry, self.entries.items + entry.parent_index * @sizeOf(FileEntry))
+                parent.is_expanded = true
+            }
+            self.rebuildVisibleRows()
+        } else {
+            // Root-level entry — reload root
+            self.entries.count = 0
+            self.visible_rows.count = 0
+            self.root_first_child = -1
+            self.root_child_count = 0
+            self.loadRootChildren()
+            self.rebuildVisibleRows()
+        }
+    }
+
     /// Change root path, clear all state, reload.
     fn setRootPath(ptr: *u8, len: i64) void {
         self.entries.count = 0

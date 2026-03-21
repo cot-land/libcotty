@@ -22,6 +22,8 @@ const CELL_SPACER: i64 = 16384    // Right half (placeholder) of a double-width 
 const CELL_BRACKET_MATCH: i64 = 32768  // Matching bracket highlight
 const CELL_CURSOR: i64 = 65536         // Cursor position (bar cursor rendered here)
 const CELL_SEARCH_MATCH: i64 = 131072  // Search match highlight
+const CELL_CURRENT_LINE: i64 = 262144  // Current line background highlight
+const CELL_WORD_HIGHLIGHT: i64 = 524288  // Occurrence highlight for selected word
 
 /// Color type constants — Ghostty-style semantic color encoding.
 const COLOR_NONE: i64 = 0     // Use terminal default (fg→theme fg, bg→theme bg)

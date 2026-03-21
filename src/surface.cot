@@ -63,7 +63,6 @@ fn ioReaderMain(arg: i64) void {
             surface.parser.feed(surface.terminal, b)
         }
         surface.terminal_mutex.unlock()
-        // Set atomic dirty flag for VSync-driven rendering
         surface.markRenderDirty()
         // Notify main thread via pipe (for title/bell/child-exit signals)
         fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
@@ -131,8 +130,8 @@ struct Surface {
     io_thread: Thread,
     notify_pipe_read: i64,
     notify_pipe_write: i64,
-    render_dirty: i64,
-    child_exited: i64,
+    render_dirty: Atomic(i64),
+    child_exited: Atomic(i64),
     inspector: Inspector,
     render_grid: TerminalGrid,
     cursor_visible: bool,
@@ -175,8 +174,8 @@ struct Surface {
             io_thread: dummy_thread,
             notify_pipe_read: -1,
             notify_pipe_write: -1,
-            render_dirty: 0,
-            child_exited: 0,
+            render_dirty: Atomic(i64).init(0),
+            child_exited: Atomic(i64).init(0),
             inspector: Inspector.init(24, 80),
             render_grid: TerminalGrid.init(0, 0),
             cursor_visible: true,
@@ -224,8 +223,8 @@ struct Surface {
                 io_thread: dummy_thread,
                 notify_pipe_read: -1,
                 notify_pipe_write: -1,
-                render_dirty: 0,
-                child_exited: 0,
+                render_dirty: Atomic(i64).init(0),
+                child_exited: Atomic(i64).init(0),
                 inspector: Inspector.init(24, 80),
                 render_grid: TerminalGrid.init(0, 0),
                 cursor_visible: true,
@@ -266,8 +265,8 @@ struct Surface {
             io_thread: dummy_thread,
             notify_pipe_read: -1,
             notify_pipe_write: -1,
-            render_dirty: 0,
-            child_exited: 0,
+            render_dirty: Atomic(i64).init(0),
+            child_exited: Atomic(i64).init(0),
             inspector: Inspector.init(24, 80),
             render_grid: TerminalGrid.init(0, 0),
             cursor_visible: true,
@@ -326,8 +325,8 @@ struct Surface {
             io_thread: dummy_thread,
             notify_pipe_read: pipe_r,
             notify_pipe_write: pipe_w,
-            render_dirty: 0,
-            child_exited: 0,
+            render_dirty: Atomic(i64).init(0),
+            child_exited: Atomic(i64).init(0),
             inspector: Inspector.init(rows, cols),
             render_grid: TerminalGrid.init(0, 0),
             cursor_visible: true,
@@ -670,6 +669,12 @@ struct Surface {
             },
             InputAction.select_line => {
                 self.selectLine()
+            },
+            InputAction.toggle_comment => {
+                self.cursor.clearGoal()
+                self.document.history.breakGroup()
+                self.last_edit_kind = 0
+                self.toggleComment()
             },
             else => {},
         }
@@ -1357,6 +1362,191 @@ struct Surface {
         self.cursor.col = 0
         self.cursor.clearGoal()
         self.document.selection = Selection.point(offset)
+    }
+
+    /// Get the line comment prefix for the current file type.
+    /// Returns "// " for most code, "# " for scripts/configs, "-- " for Lua/SQL.
+    fn commentPrefix() string {
+        if (self.document.filepath) |path| {
+            if (endsWith(path, ".py") or endsWith(path, ".sh") or endsWith(path, ".bash") or
+                endsWith(path, ".zsh") or endsWith(path, ".rb") or endsWith(path, ".yml") or
+                endsWith(path, ".yaml") or endsWith(path, ".toml")) {
+                return "# "
+            }
+            if (endsWith(path, ".lua") or endsWith(path, ".sql")) {
+                return "-- "
+            }
+        }
+        return "// "
+    }
+
+    /// Toggle line comments on the selected lines (Cmd+/).
+    /// If all non-empty lines are commented, remove comments. Otherwise add comments.
+    fn toggleComment() void {
+        const prefix = self.commentPrefix()
+        const prefix_len = prefix.len
+        const buf_len = self.document.buffer.len()
+        // Determine line range
+        const primary = self.document.selection.primary()
+        var first_line = self.cursor.line
+        var last_line = self.cursor.line
+        if (!primary.isEmpty()) {
+            first_line = self.document.buffer.lineFromOffset(primary.from())
+            last_line = self.document.buffer.lineFromOffset(primary.to())
+            // Exclude last line if selection ends at column 0
+            if (primary.to() == self.document.buffer.lineStartOffset(last_line) and last_line > first_line) {
+                last_line -= 1
+            }
+        }
+        // Check if all non-empty lines start with the comment prefix (at any indent)
+        var all_commented = true
+        var line = first_line
+        while (line <= last_line) {
+            const ls = self.document.buffer.lineStartOffset(line)
+            const ll = self.document.buffer.lineLength(line)
+            if (ll > 0) {
+                // Skip leading whitespace
+                var indent: i64 = 0
+                while (indent < ll) {
+                    const ch = self.document.buffer.charAt(ls + indent)
+                    if (ch != ' ' and ch != '\t') { break }
+                    indent += 1
+                }
+                // Check if prefix matches at this position
+                if (indent + prefix_len > ll) {
+                    all_commented = false
+                } else {
+                    var pi: i64 = 0
+                    while (pi < prefix_len) {
+                        if (self.document.buffer.charAt(ls + indent + pi) != prefix[pi]) {
+                            all_commented = false
+                            break
+                        }
+                        pi += 1
+                    }
+                }
+            }
+            if (!all_commented) { break }
+            line += 1
+        }
+        if (all_commented) {
+            // Uncomment: remove prefix from each line
+            self.uncommentLines(first_line, last_line, prefix, prefix_len)
+        } else {
+            // Comment: find minimum indent, insert prefix at that column
+            self.commentLines(first_line, last_line, prefix, prefix_len)
+        }
+    }
+
+    /// Add comment prefix to lines at the minimum indent column.
+    fn commentLines(first_line: i64, last_line: i64, prefix: string, prefix_len: i64) void {
+        const buf_len = self.document.buffer.len()
+        // Find minimum indent across non-empty lines
+        var min_indent: i64 = 9999
+        var line = first_line
+        while (line <= last_line) {
+            const ls = self.document.buffer.lineStartOffset(line)
+            const ll = self.document.buffer.lineLength(line)
+            if (ll > 0) {
+                var indent: i64 = 0
+                while (indent < ll) {
+                    const ch = self.document.buffer.charAt(ls + indent)
+                    if (ch != ' ' and ch != '\t') { break }
+                    indent += 1
+                }
+                if (indent < ll and indent < min_indent) { min_indent = indent }
+            }
+            line += 1
+        }
+        if (min_indent == 9999) { min_indent = 0 }
+        // Build changeset: insert prefix at min_indent on each non-empty line
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        line = first_line
+        while (line <= last_line) {
+            const ls = self.document.buffer.lineStartOffset(line)
+            const ll = self.document.buffer.lineLength(line)
+            if (ll > 0) {
+                const insert_at = ls + min_indent
+                const gap = insert_at - prev_offset
+                if (gap > 0) { cs.retain(gap) }
+                cs.insert(prefix)
+                prev_offset = insert_at
+            }
+            line += 1
+        }
+        const rest = buf_len - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        const new_cursor = self.cursor.offset + prefix_len
+        self.applyEdit(txn, self.cursor.offset, new_cursor)
+        self.cursor.offset = new_cursor
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Remove comment prefix from each line.
+    fn uncommentLines(first_line: i64, last_line: i64, prefix: string, prefix_len: i64) void {
+        const buf_len = self.document.buffer.len()
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        var total_removed: i64 = 0
+        var removed_before_cursor: i64 = 0
+        var line = first_line
+        while (line <= last_line) {
+            const ls = self.document.buffer.lineStartOffset(line)
+            const ll = self.document.buffer.lineLength(line)
+            if (ll > 0) {
+                // Find the prefix position (skip leading whitespace)
+                var indent: i64 = 0
+                while (indent < ll) {
+                    const ch = self.document.buffer.charAt(ls + indent)
+                    if (ch != ' ' and ch != '\t') { break }
+                    indent += 1
+                }
+                const prefix_start = ls + indent
+                const gap = prefix_start - prev_offset
+                if (gap > 0) { cs.retain(gap) }
+                cs.delete(prefix_len)
+                prev_offset = prefix_start + prefix_len
+                total_removed += prefix_len
+                if (prefix_start < self.cursor.offset) {
+                    removed_before_cursor += prefix_len
+                }
+            }
+            line += 1
+        }
+        const rest = buf_len - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        var new_cursor = self.cursor.offset - removed_before_cursor
+        if (new_cursor < 0) { new_cursor = 0 }
+        self.applyEdit(txn, self.cursor.offset, new_cursor)
+        self.cursor.offset = new_cursor
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+    }
+
+    /// Revert buffer to the saved file on disk.
+    fn revertToSaved() bool {
+        if (self.document.filepath) |path| {
+            const content = readFile(path) catch { return false }
+            const buf_len = self.document.buffer.len()
+            // Build changeset: delete everything, insert file content
+            var cs = ChangeSet.init()
+            if (buf_len > 0) { cs.delete(buf_len) }
+            cs.insert(content)
+            var txn = Transaction { changes: cs }
+            self.applyEdit(txn, self.cursor.offset, 0)
+            self.cursor.offset = 0
+            self.cursor.line = 0
+            self.cursor.col = 0
+            self.cursor.clearGoal()
+            self.document.selection = Selection.point(0)
+            self.document.dirty = false
+            return true
+        }
+        return false
     }
 
     /// Add a new cursor at the given byte offset.
@@ -2217,6 +2407,190 @@ struct Surface {
         }
     }
 
+    /// Highlight the current line (Zed: editor_active_line_background).
+    /// Sets CELL_CURRENT_LINE on all cells of the cursor's display row.
+    /// Skipped when a multi-line selection is active.
+    fn renderCurrentLineHighlight(gutter_w: i64, row_offset: i64) void {
+        // Skip if multi-line selection is active
+        const primary = self.document.selection.primary()
+        if (!primary.isEmpty()) {
+            const from_line = self.document.buffer.lineFromOffset(primary.from())
+            const to_line = self.document.buffer.lineFromOffset(primary.to())
+            if (from_line != to_line) { return }
+        }
+        const content_cols = self.viewport_cols - gutter_w
+        if (content_cols <= 0) { return }
+        const cursor_dr = self.wrapBufToDisplayRow(self.cursor.line, self.cursor.col, content_cols)
+        const screen_row = cursor_dr - self.scroll_offset + row_offset
+        if (screen_row < row_offset or screen_row >= self.viewport_rows) { return }
+        // Mark all cells on this row
+        for col in 0..self.viewport_cols {
+            const c = self.render_grid.getCell(screen_row, col)
+            c.flags = c.flags | CELL_CURRENT_LINE
+        }
+    }
+
+    /// Highlight all occurrences of the word under cursor or selected text.
+    /// Sets CELL_WORD_HIGHLIGHT on matching cells (skips the primary selection itself).
+    fn renderOccurrenceHighlights(gutter_w: i64, row_offset: i64, content_rows: i64) void {
+        const content_cols = self.viewport_cols - gutter_w
+        if (content_cols <= 0) { return }
+        const buf_len = self.document.buffer.len()
+        if (buf_len == 0) { return }
+        // Determine word to highlight
+        const primary = self.document.selection.primary()
+        var word_start: i64 = 0
+        var word_end: i64 = 0
+        if (!primary.isEmpty()) {
+            // Use selected text (single-line, < 100 chars)
+            word_start = primary.from()
+            word_end = primary.to()
+            const from_line = self.document.buffer.lineFromOffset(word_start)
+            const to_line = self.document.buffer.lineFromOffset(word_end)
+            if (from_line != to_line) { return }
+            if (word_end - word_start > 100) { return }
+        } else {
+            // Word under cursor
+            var pos = self.cursor.offset
+            if (pos >= buf_len) { pos = buf_len - 1 }
+            if (pos < 0) { return }
+            const cat = charCategory(self.document.buffer.charAt(pos))
+            if (cat != 1) { return }  // Only highlight word characters
+            word_start = pos
+            while (word_start > 0) {
+                if (charCategory(self.document.buffer.charAt(word_start - 1)) != cat) { break }
+                word_start -= 1
+            }
+            word_end = pos + 1
+            while (word_end < buf_len) {
+                if (charCategory(self.document.buffer.charAt(word_end)) != cat) { break }
+                word_end += 1
+            }
+        }
+        const word_len = word_end - word_start
+        if (word_len == 0 or word_len > 100) { return }
+        // Find all occurrences (case-sensitive)
+        var search_pos: i64 = 0
+        while (search_pos + word_len <= buf_len) {
+            var match = true
+            var j: i64 = 0
+            while (j < word_len) {
+                if (self.document.buffer.charAt(search_pos + j) != self.document.buffer.charAt(word_start + j)) {
+                    match = false
+                    break
+                }
+                j += 1
+            }
+            if (match) {
+                // Skip the match that overlaps the primary selection
+                if (search_pos != word_start) {
+                    self.markOccurrence(search_pos, search_pos + word_len, gutter_w, row_offset, content_cols)
+                }
+                search_pos += word_len
+            } else {
+                search_pos += 1
+            }
+        }
+    }
+
+    /// Mark cells for a single occurrence highlight.
+    fn markOccurrence(from: i64, to: i64, gutter_w: i64, row_offset: i64, content_cols: i64) void {
+        const from_line = self.document.buffer.lineFromOffset(from)
+        const from_col = from - self.document.buffer.lineStartOffset(from_line)
+        const to_line = self.document.buffer.lineFromOffset(to - 1)
+        const to_col = to - self.document.buffer.lineStartOffset(to_line)
+        const from_dr = self.wrapBufToDisplayRow(from_line, from_col, content_cols)
+        const to_dr = self.wrapBufToDisplayRow(to_line, to_col - 1, content_cols)
+        var dr = from_dr
+        while (dr <= to_dr) {
+            const screen_row = dr - self.scroll_offset + row_offset
+            if (screen_row < row_offset) { dr += 1; continue }
+            if (screen_row >= self.viewport_rows) { break }
+            const dr_line = self.wrapDisplayRowToLine(dr)
+            const dr_base = self.wrapLineToDisplayRow(dr_line)
+            const wrap_row = dr - dr_base
+            const line_len = self.document.buffer.lineLength(dr_line)
+            const wrap_start = wrap_row * content_cols
+            var wrap_end = wrap_start + content_cols
+            if (wrap_end > line_len) { wrap_end = line_len }
+            var sel_start: i64 = 0
+            if (dr_line == from_line) { sel_start = from_col }
+            var sel_end = line_len
+            if (dr_line == to_line) { sel_end = to_col }
+            if (sel_start < wrap_start) { sel_start = wrap_start }
+            if (sel_end > wrap_end) { sel_end = wrap_end }
+            var col = sel_start
+            while (col < sel_end) {
+                const screen_col = gutter_w + col - wrap_start
+                if (screen_col >= 0 and screen_col < self.viewport_cols) {
+                    const c = self.render_grid.getCell(screen_row, screen_col)
+                    c.flags = c.flags | CELL_WORD_HIGHLIGHT
+                    c.bg_type = COLOR_RGB
+                    c.bg_val = packRgb(60, 60, 40)
+                }
+                col += 1
+            }
+            dr += 1
+        }
+    }
+
+    /// Trim trailing whitespace from all lines. Returns true if any changes were made.
+    fn trimTrailingWhitespace() bool {
+        const total_lines = self.document.buffer.lineCount()
+        const buf_len = self.document.buffer.len()
+        // First pass: find all trailing whitespace ranges
+        var any_ws = false
+        var cs = ChangeSet.init()
+        var prev_offset: i64 = 0
+        var line: i64 = 0
+        while (line < total_lines) {
+            const line_start = self.document.buffer.lineStartOffset(line)
+            const line_len = self.document.buffer.lineLength(line)
+            const line_end = line_start + line_len
+            // Walk back from line end to find trailing whitespace
+            var trim_start = line_end
+            while (trim_start > line_start) {
+                const ch = self.document.buffer.charAt(trim_start - 1)
+                if (ch != ' ' and ch != '\t') { break }
+                trim_start -= 1
+            }
+            const trim_len = line_end - trim_start
+            if (trim_len > 0) {
+                const gap = trim_start - prev_offset
+                if (gap > 0) { cs.retain(gap) }
+                cs.delete(trim_len)
+                prev_offset = trim_start + trim_len
+                any_ws = true
+            }
+            line += 1
+        }
+        if (!any_ws) { return false }
+        const rest = buf_len - prev_offset
+        if (rest > 0) { cs.retain(rest) }
+        var txn = Transaction { changes: cs }
+        // Clamp cursor if it's in deleted whitespace
+        var new_cursor = self.cursor.offset
+        new_cursor = txn.mapPos(new_cursor, ASSOC_BEFORE)
+        self.applyEdit(txn, self.cursor.offset, new_cursor)
+        self.cursor.offset = new_cursor
+        self.recomputeLineCol()
+        self.document.selection = Selection.point(self.cursor.offset)
+        return true
+    }
+
+    /// Ensure buffer ends with a newline. Returns true if one was inserted.
+    fn ensureFinalNewline() bool {
+        const buf_len = self.document.buffer.len()
+        if (buf_len == 0) { return false }
+        if (self.document.buffer.charAt(buf_len - 1) == '\n') { return false }
+        var cs = ChangeSet.init()
+        cs.retain(buf_len)
+        cs.insertByte('\n')
+        var txn = Transaction { changes: cs }
+        self.applyEdit(txn, self.cursor.offset, self.cursor.offset)
+        return true
+    }
+
     // ========================================================================
     // Soft Wrap Map (Zed: WrapMap)
     // ========================================================================
@@ -2370,6 +2744,12 @@ struct Surface {
             // Content for this wrap segment
             self.renderWrappedLineContent(screen_row, doc_line, wrap_row, gutter_w, content_cols)
         }
+
+        // Current line highlight (before selection so selection draws on top)
+        self.renderCurrentLineHighlight(gutter_w, overlay_rows)
+
+        // Occurrence highlights (word under cursor / selected word)
+        self.renderOccurrenceHighlights(gutter_w, overlay_rows, content_rows)
 
         // Search match highlights
         if (self.search.active and self.search.matches.count > 0) {
@@ -2781,7 +3161,8 @@ struct Surface {
         const gutter_w = self.gutterWidth(total_lines)
         const content_cols = self.viewport_cols - gutter_w
         self.rebuildWrapMap(content_cols)
-        const max_offset = self.wrap_total_rows - self.viewport_rows
+        // Allow scrolling past end so last line can reach the top of the viewport
+        const max_offset = self.wrap_total_rows - 1
         if (offset < 0) { self.scroll_offset = 0 }
         else if (max_offset > 0 and offset > max_offset) { self.scroll_offset = max_offset }
         else { self.scroll_offset = offset }
@@ -2865,18 +3246,22 @@ struct Surface {
 
     /// Set the render dirty flag (atomic). Called by IO thread after VT parse batch.
     fn markRenderDirty() void {
-        @atomicStore(&self.render_dirty, 1)
+        self.render_dirty.store(1)
+        eprintln("[render] markDirty: self=${@ptrToInt(self)} &value=${@ptrToInt(&self.render_dirty.value)}")
     }
 
     /// Check and clear the render dirty flag (atomic). Called by Swift VSync callback.
-    /// Returns 1 if dirty (needs render), 0 if clean.
     fn checkAndClearDirty() i64 {
-        return @atomicExchange(&self.render_dirty, 0)
+        const r = self.render_dirty.exchange(0)
+        if (r != 0) {
+            eprintln("[render] checkDirty: self=${@ptrToInt(self)} DIRTY r=${r}")
+        }
+        return r
     }
 
     /// Mark child process as exited (atomic). Called by IO thread on EOF.
     fn markChildExited() void {
-        @atomicStore(&self.child_exited, 1)
+        self.child_exited.store(1)
     }
 
     /// Return the title for this surface.

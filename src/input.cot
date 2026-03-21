@@ -79,6 +79,7 @@ const InputAction = enum(u8) {
     duplicate_line,
     join_lines,
     select_line,
+    toggle_comment,
 
     /// Return a display name for this action.
     fn name() string {
@@ -139,6 +140,7 @@ const InputAction = enum(u8) {
             .duplicate_line => "duplicate_line",
             .join_lines => "join_lines",
             .select_line => "select_line",
+            .toggle_comment => "toggle_comment",
         }
     }
 }

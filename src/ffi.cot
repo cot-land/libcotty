@@ -121,7 +121,11 @@ fn currentSplitTreeForWs(wptr: *Workspace) *SplitTree {
 // ============================================================================
 
 /// Create and initialize the global app. Returns opaque app handle.
+// Install Cot signal handler for crash traces (DWARF file:line:col in debug mode)
+extern fn __cot_install_signals() void
+
 export fn cotty_app_new() i64 {
+    __cot_install_signals()
     g_app = App.init()
     const path = configPath()
     if (path.len > 0) {
@@ -923,7 +927,7 @@ export fn cotty_terminal_check_dirty(surface: i64) i64 {
 /// Returns 1 if child exited, 0 if still running.
 export fn cotty_terminal_child_exited(surface: i64) i64 {
     const s = getSurfacePtr(surface)
-    return @atomicLoad(&s.child_exited)
+    return s.child_exited.load()
 }
 
 // ============================================================================
@@ -1720,11 +1724,14 @@ fn getWorkspacePtr(handle: i64) *Workspace {
 /// Create a new workspace. Heap-allocated, returns an opaque handle.
 export fn cotty_workspace_new(app: i64) i64 {
     var ws = Workspace.init(&g_app)
-    // Allocate on heap and copy — ARC forwards ownership (no manual zeroing needed)
+    eprintln("[ws] init: tabs.count=${ws.tabs.count} tabs.items=${ws.tabs.items}")
     const ptr = alloc(0, @sizeOf(Workspace))
     const dst = @intToPtr(*Workspace, ptr)
     dst.* = ws
+    eprintln("[ws] after copy: dst.tabs.count=${dst.tabs.count} dst.tabs.items=${dst.tabs.items}")
+    eprintln("[ws] after copy: ws.tabs.count=${ws.tabs.count} ws.tabs.items=${ws.tabs.items}")
     return ptr
+    // ws goes out of scope — does ARC release tabs backing array?
 }
 
 /// Free a workspace. Surfaces are freed separately via app.
@@ -1737,15 +1744,25 @@ export fn cotty_workspace_free(workspace: i64) void {
 
 /// Add a terminal tab. Returns the surface handle.
 export fn cotty_workspace_add_terminal_tab(ws: i64, rows: i64, cols: i64) i64 {
+    eprintln("[ws] add_terminal_tab: ws=${ws} rows=${rows} cols=${cols}")
     const wptr = getWorkspacePtr(ws)
+    eprintln("[ws] add_terminal_tab: tabs.count=${wptr.tabs.count} tabs.items=${wptr.tabs.items}")
     const surface_handle = wptr.addTerminalTab(rows, cols)
+    eprintln("[ws] add_terminal_tab: surface=${surface_handle} tabs.count=${wptr.tabs.count} tabs.items=${wptr.tabs.items}")
+    eprintln("[ws] after addTerminalTab: selected_index=${wptr.selected_index}")
     // Wire inspector pointer into the parser so VT events are recorded
     const sptr = getSurfacePtr(surface_handle)
     sptr.parser.inspector_ptr = @ptrToInt(&sptr.inspector)
+    eprintln("[ws] after inspector wire: selected_index=${wptr.selected_index}")
     // Start IO thread now that the surface is at its final address
     sptr.startIoThread()
+    eprintln("[ws] after startIoThread: selected_index=${wptr.selected_index}")
     // Create split tree for this tab
     findOrCreateSplitTree(surface_handle)
+    eprintln("[ws] after findOrCreateSplitTree: selected_index=${wptr.selected_index}")
+    // Check ARC refcount: header is at ptr-32, refcount at ptr-8
+    const rc = @intToPtr(*i64, ws - 8).*
+    eprintln("[ws] workspace refcount before return: ${rc}")
     return surface_handle
 }
 
@@ -1803,14 +1820,22 @@ export fn cotty_workspace_tab_count(ws: i64) i64 {
 
 /// Return the selected tab index (-1 if none).
 export fn cotty_workspace_selected_index(ws: i64) i64 {
-    return getWorkspacePtr(ws).selected_index
+    const idx = getWorkspacePtr(ws).selected_index
+    eprintln("[ws] selected_index: ws=${ws} idx=${idx}")
+    return idx
 }
 
 /// Return the surface handle for tab at index.
 export fn cotty_workspace_tab_surface(ws: i64, index: i64) i64 {
     const wptr = getWorkspacePtr(ws)
-    if (index < 0 or index >= wptr.tabs.count) { return 0 }
-    return @ptrToInt(wptr.getTab(index).surface)
+    eprintln("[ws] tab_surface: ws=${ws} index=${index} tabs.count=${wptr.tabs.count} tabs.items=${wptr.tabs.items} tabs.cap=${wptr.tabs.capacity}")
+    if (index < 0 or index >= wptr.tabs.count) {
+        eprintln("[ws] tab_surface: OUT OF BOUNDS")
+        return 0
+    }
+    const result = @ptrToInt(wptr.getTab(index).surface)
+    eprintln("[ws] tab_surface: result=${result}")
+    return result
 }
 
 /// Return 1 if the tab is a terminal, 0 if editor.
