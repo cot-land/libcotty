@@ -149,8 +149,8 @@ struct Surface {
     /// Create a terminal surface with a shell spawned via Cot's PTY.
     /// Sets up IO reader thread: mutex, notification pipe, and spawns thread.
     /// Heap-allocated with ARC for pointer stability (IO thread holds raw pointer).
-    static fn initTerminal(rows: i64, cols: i64) *Surface {
-        const pty = Pty.spawn(rows, cols)
+    static fn initTerminal(rows: i64, cols: i64, integration_dir: string) *Surface {
+        const pty = Pty.spawn(rows, cols, integration_dir)
         var term = TerminalState.init(rows, cols)
         term.pty_fd = pty.master_fd
 
@@ -507,7 +507,7 @@ test "surface move down from last line no-op" {
 }
 
 test "terminal surface kind" {
-    var s = Surface.initTerminal(24, 80)
+    var s = Surface.initTerminal(24, 80, "")
     @assertEq(s.kind, SurfaceKind.Terminal)
     @assert(s.isTerminal())
     @assertEq(s.title(), "terminal")

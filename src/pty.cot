@@ -3,6 +3,8 @@
 
 import "std/sys"
 import "std/process"
+import "std/string"
+import "std/mem"
 
 /// Unpack the master fd from openpty()/pipe() packed result.
 fn masterFd(fds: i64) i64 {
@@ -14,19 +16,132 @@ fn slaveFd(fds: i64) i64 {
     return (fds >> 32) & 4294967295
 }
 
+/// Build envp with shell integration: inject ZDOTDIR for zsh integration scripts.
+/// Copies parent environment, replacing ZDOTDIR and adding TERM if needed.
+/// Reference: Ghostty shell_integration.zig:891-917 (setupZsh)
+fn buildEnvpWithIntegration(integration_dir: string) i64 {
+    const count = environ_count()
+
+    // Scan parent env for ZDOTDIR and TERM
+    var has_zdotdir = false
+    var zdotdir_idx: i64 = -1
+    var has_term = false
+    var i: i64 = 0
+    while (i < count) {
+        const elen = environ_len(i)
+        const eptr = environ_ptr(i)
+        if (elen >= 8 and startsWith(eptr, elen, @ptrOf("ZDOTDIR="), 8)) {
+            has_zdotdir = true
+            zdotdir_idx = i
+        }
+        if (elen >= 5 and startsWith(eptr, elen, @ptrOf("TERM="), 5)) {
+            has_term = true
+        }
+        i = i + 1
+    }
+
+    // Calculate extra slots: ZDOTDIR (replace or add), COTTY_ZSH_ZDOTDIR (if original exists), TERM (if missing)
+    var extra: i64 = 1  // new ZDOTDIR
+    if (has_zdotdir) { extra = extra + 1 }  // COTTY_ZSH_ZDOTDIR to save original
+    if (not has_term) { extra = extra + 1 }  // TERM=xterm-256color
+
+    // Build the new ZDOTDIR value: integration_dir + "/zsh"
+    const zdotdir_prefix = "ZDOTDIR="
+    const zsh_suffix = "/zsh"
+    const new_zdotdir_len = @lenOf(zdotdir_prefix) + @lenOf(integration_dir) + @lenOf(zsh_suffix)
+
+    // Allocate pointer array (count + extra + 1 for NULL, minus 1 if replacing ZDOTDIR)
+    var total_entries = count + extra
+    if (has_zdotdir) { total_entries = total_entries - 1 }  // replacing, not adding
+    var buf = alloc(0, (total_entries + 1) * 8)
+
+    // Calculate total string bytes needed
+    var total_str: i64 = 0
+    i = 0
+    while (i < count) {
+        if (i != zdotdir_idx) {
+            total_str = total_str + environ_len(i) + 1
+        }
+        i = i + 1
+    }
+    total_str = total_str + new_zdotdir_len + 1  // new ZDOTDIR=.../zsh
+    if (has_zdotdir) {
+        // COTTY_ZSH_ZDOTDIR=<original_value>
+        const orig_len = environ_len(zdotdir_idx) - 8  // subtract "ZDOTDIR="
+        total_str = total_str + 22 + orig_len + 1  // "COTTY_ZSH_ZDOTDIR=" = 19 chars + value + null
+    }
+    if (not has_term) {
+        total_str = total_str + 20 + 1  // "TERM=xterm-256color" + null
+    }
+
+    var str_buf = alloc(0, total_str)
+    var pos: i64 = 0
+    var slot: i64 = 0
+
+    // Copy parent env vars (skip original ZDOTDIR)
+    i = 0
+    while (i < count) {
+        if (i != zdotdir_idx) {
+            const elen = environ_len(i)
+            const eptr = environ_ptr(i)
+            memcpy(str_buf + pos, eptr, elen)
+            @intToPtr(*u8, str_buf + pos + elen).* = @intCast(u8, 0)
+            @intToPtr(*i64, buf + slot * 8).* = str_buf + pos
+            pos = pos + elen + 1
+            slot = slot + 1
+        }
+        i = i + 1
+    }
+
+    // Add new ZDOTDIR=<integration_dir>/zsh
+    const zdotdir_start = str_buf + pos
+    memcpy(zdotdir_start, @ptrOf(zdotdir_prefix), @lenOf(zdotdir_prefix))
+    memcpy(zdotdir_start + @lenOf(zdotdir_prefix), @ptrOf(integration_dir), @lenOf(integration_dir))
+    memcpy(zdotdir_start + @lenOf(zdotdir_prefix) + @lenOf(integration_dir), @ptrOf(zsh_suffix), @lenOf(zsh_suffix))
+    @intToPtr(*u8, zdotdir_start + new_zdotdir_len).* = @intCast(u8, 0)
+    @intToPtr(*i64, buf + slot * 8).* = zdotdir_start
+    pos = pos + new_zdotdir_len + 1
+    slot = slot + 1
+
+    // Save original ZDOTDIR as COTTY_ZSH_ZDOTDIR
+    if (has_zdotdir) {
+        const save_prefix = "COTTY_ZSH_ZDOTDIR="
+        const orig_zdotdir_ptr = environ_ptr(zdotdir_idx) + 8  // skip "ZDOTDIR="
+        const orig_zdotdir_len = environ_len(zdotdir_idx) - 8
+        const save_start = str_buf + pos
+        memcpy(save_start, @ptrOf(save_prefix), @lenOf(save_prefix))
+        memcpy(save_start + @lenOf(save_prefix), orig_zdotdir_ptr, orig_zdotdir_len)
+        @intToPtr(*u8, save_start + @lenOf(save_prefix) + orig_zdotdir_len).* = @intCast(u8, 0)
+        @intToPtr(*i64, buf + slot * 8).* = save_start
+        pos = pos + @lenOf(save_prefix) + orig_zdotdir_len + 1
+        slot = slot + 1
+    }
+
+    // Add TERM=xterm-256color if not already set
+    if (not has_term) {
+        const term_str = "TERM=xterm-256color"
+        const term_start = str_buf + pos
+        memcpy(term_start, @ptrOf(term_str), @lenOf(term_str))
+        @intToPtr(*u8, term_start + @lenOf(term_str)).* = @intCast(u8, 0)
+        @intToPtr(*i64, buf + slot * 8).* = term_start
+        pos = pos + @lenOf(term_str) + 1
+        slot = slot + 1
+    }
+
+    // NULL terminator
+    @intToPtr(*i64, buf + slot * 8).* = 0
+    return buf
+}
+
 /// A pseudo-terminal pair: master fd for I/O, child process id.
 struct Pty {
     master_fd: i64,
     child_pid: i64,
 
     /// Spawn a shell in a new PTY with the given grid dimensions.
-    ///
-    /// Opens a pseudo-terminal pair, forks a child process, and execs
-    /// /bin/zsh with the slave PTY as stdin/stdout/stderr. The parent
-    /// keeps the master fd for reading and writing.
-    ///
-    /// Returns a Pty with master_fd = -1 on failure.
-    static fn spawn(rows: i64, cols: i64) Pty {
+    /// integration_dir: path to shell-integration scripts directory.
+    /// If empty, uses buildEnvp() without integration (plain env).
+    static fn spawn(rows: i64, cols: i64, integration_dir: string) Pty {
         const fds = openpty()
         if (fds < 0) {
             return Pty { master_fd: -1, child_pid: -1 }
@@ -45,7 +160,12 @@ struct Pty {
         const shell = "/bin/zsh"
         const path = buildPath(shell)
         const argv = argvBuild1(shell)
-        const envp = buildEnvp()
+        var envp: i64 = 0
+        if (@lenOf(integration_dir) > 0) {
+            envp = buildEnvpWithIntegration(integration_dir)
+        } else {
+            envp = buildEnvp()
+        }
 
         const pid = fork()
         if (pid < 0) {
@@ -126,7 +246,7 @@ test "fd packing large values" {
 }
 
 test "spawn creates valid pty" {
-    var pty = Pty.spawn(24, 80)
+    var pty = Pty.spawn(24, 80, "")
     @assert(pty.isValid())
     @assert(pty.master_fd >= 0)
     @assert(pty.child_pid > 0)
