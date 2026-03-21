@@ -52,8 +52,8 @@ struct App {
     }
 
     /// Add a terminal surface with the given dimensions. Returns its pointer.
-    fn addTerminalSurface(rows: i64, cols: i64) *Surface {
-        const s = Surface.initTerminal(rows, cols)
+    fn addTerminalSurface(rows: i64, cols: i64, integration_dir: string) *Surface {
+        const s = Surface.initTerminal(rows, cols, integration_dir)
         self.surfaces.append(s)
         self.focused_surface = s
         return s

@@ -1,0 +1,101 @@
+# vim:ft=zsh
+#
+# Cotty zsh shell integration — OSC 133 semantic prompt markers.
+# Adapted from Ghostty's zsh integration (GPLv3, originally from Kitty).
+#
+# This is an autoloadable function invoked from .zshenv.
+# It adds precmd/preexec hooks that emit OSC 133 markers so the terminal
+# can identify prompt boundaries, command regions, and output regions.
+
+_entrypoint() {
+    builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+
+    [[ -o interactive ]]          || builtin return 0
+    (( ! $+_cotty_state ))        || builtin return 0
+
+
+    # State: 0=initial, 1=command running (C sent), 2=idle (D sent)
+    builtin typeset -gi _cotty_state
+
+    # Open a cloexec fd to the TTY for reliable output even when stdout is redirected.
+    typeset -gi _cotty_fd
+    {
+        builtin zmodload zsh/system && (( $+builtins[sysopen] )) && {
+            { [[ -w     $TTY ]] && builtin sysopen -o cloexec -wu _cotty_fd --     $TTY } ||
+            { [[ -w /dev/tty ]] && builtin sysopen -o cloexec -wu _cotty_fd -- /dev/tty }
+        }
+    } 2>/dev/null || (( _cotty_fd = 1 ))
+
+    builtin typeset -ag precmd_functions
+    precmd_functions+=(_cotty_deferred_init)
+}
+
+_cotty_deferred_init() {
+    builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+
+    _cotty_precmd() {
+        builtin local -i cmd_status=$?
+        builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+
+        if ! builtin zle; then
+            if (( _cotty_state == 1 )); then
+                builtin print -nu $_cotty_fd '\e]133;D;'$cmd_status'\a'
+                (( _cotty_state = 2 ))
+            elif (( _cotty_state == 2 )); then
+                builtin print -nu $_cotty_fd '\e]133;D\a'
+            fi
+        fi
+
+        builtin local mark1=$'%{\e]133;A;cl=line\a%}'
+        if [[ -o prompt_percent ]]; then
+            builtin typeset -g precmd_functions
+            if [[ ${precmd_functions[-1]} == _cotty_precmd ]]; then
+                builtin local mark2=$'%{\e]133;A;k=s\a%}'
+                builtin local markB=$'%{\e]133;B\a%}'
+                [[ $PS1 == *$mark1* ]] || PS1=${mark1}${PS1}
+                [[ $PS1 == *$markB* ]] || PS1=${PS1}${markB}
+                if [[ $PS1 == *$'\n'* ]]; then
+                    PS1=${PS1//$'\n'/$'\n'${mark2}}
+                fi
+                [[ $PS2 == *$mark2* ]] || PS2=${mark2}${PS2}
+                [[ $PS2 == *$markB* ]] || PS2=${PS2}${markB}
+                (( _cotty_state = 2 ))
+            else
+                precmd_functions=(${precmd_functions:#_cotty_precmd} _cotty_precmd)
+                if ! builtin zle; then
+                    builtin print -rnu $_cotty_fd -- $mark1[3,-3]
+                    (( _cotty_state = 2 ))
+                fi
+            fi
+        elif ! builtin zle; then
+            builtin print -rnu $_cotty_fd -- $mark1[3,-3]
+            (( _cotty_state = 2 ))
+        fi
+    }
+
+    _cotty_preexec() {
+        builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+        PS1=${PS1//$'%{\e]133;A;cl=line\a%}'}
+        PS1=${PS1//$'%{\e]133;A;k=s\a%}'}
+        PS1=${PS1//$'%{\e]133;B\a%}'}
+        PS2=${PS2//$'%{\e]133;A;k=s\a%}'}
+        PS2=${PS2//$'%{\e]133;B\a%}'}
+        builtin print -nu $_cotty_fd '\e]133;C\a'
+        (( _cotty_state = 1 ))
+    }
+
+    # Report working directory on cd
+    _cotty_report_pwd() { builtin print -nu $_cotty_fd '\e]7;file://'"$HOST""$PWD"'\a'; }
+    chpwd_functions=(${chpwd_functions[@]} "_cotty_report_pwd")
+
+    # Remove deferred init from precmd
+    precmd_functions=(${precmd_functions:#_cotty_deferred_init})
+    precmd_functions+=(_cotty_precmd)
+    preexec_functions+=(_cotty_preexec)
+
+    # Report initial PWD and trigger first precmd
+    _cotty_report_pwd
+    _cotty_precmd
+}
+
+_entrypoint "$@"

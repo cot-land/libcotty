@@ -103,13 +103,7 @@ struct Pty {
     child_pid: i64,
 
     /// Spawn a shell in a new PTY with the given grid dimensions.
-    ///
-    /// Opens a pseudo-terminal pair, forks a child process, and execs
-    /// /bin/zsh with the slave PTY as stdin/stdout/stderr. The parent
-    /// keeps the master fd for reading and writing.
-    ///
-    /// Returns a Pty with master_fd = -1 on failure.
-    static fn spawn(rows: i64, cols: i64) Pty {
+    static fn spawn(rows: i64, cols: i64, integration_dir: string) Pty {
         const fds = openpty()
         if (fds < 0) {
             return Pty { master_fd: -1, child_pid: -1 }
@@ -209,7 +203,7 @@ test "fd packing large values" {
 }
 
 test "spawn creates valid pty" {
-    var pty = Pty.spawn(24, 80)
+    var pty = Pty.spawn(24, 80, "")
     @assert(pty.isValid())
     @assert(pty.master_fd >= 0)
     @assert(pty.child_pid > 0)

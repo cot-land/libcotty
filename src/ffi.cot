@@ -866,10 +866,20 @@ export fn cotty_editor_revert(surface: i64) i64 {
 /// Create a new terminal surface with a shell. Returns an opaque pointer handle.
 /// Starts the IO reader thread after the surface is in its final memory location.
 export fn cotty_terminal_surface_new(app: i64, rows: i64, cols: i64) i64 {
-    const s = g_app.addTerminalSurface(rows, cols)
+    const s = g_app.addTerminalSurface(rows, cols, "")
     // Wire inspector pointer into the parser so VT events are recorded
     s.parser.inspector_ptr = @ptrToInt(&s.inspector)
     // Start IO thread now that the surface is at its final address in the list
+    s.startIoThread()
+    return @ptrToInt(s)
+}
+
+/// Create a terminal surface with shell integration scripts.
+/// integration_ptr + integration_len: path to the shell-integration directory.
+export fn cotty_terminal_surface_new_with_integration(app: i64, rows: i64, cols: i64, integration_ptr: i64, integration_len: i64) i64 {
+    const dir = @string(integration_ptr, integration_len)
+    const s = g_app.addTerminalSurface(rows, cols, dir)
+    s.parser.inspector_ptr = @ptrToInt(&s.inspector)
     s.startIoThread()
     return @ptrToInt(s)
 }

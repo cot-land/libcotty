@@ -47,7 +47,7 @@ struct Workspace {
     /// Add a terminal tab. Creates a terminal surface via the app, appends tab, selects it.
     /// Returns the surface handle (pointer as i64) for Swift to create the view.
     fn addTerminalTab(rows: i64, cols: i64) i64 {
-        const s = self.app.addTerminalSurface(rows, cols)
+        const s = self.app.addTerminalSurface(rows, cols, "")
         const tab = Tab {
             surface: s,
             is_preview: false,

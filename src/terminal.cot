@@ -3784,6 +3784,23 @@ test "carriageReturn resets column" {
     @assertEq(t.pending_wrap, false)
 }
 
+test "PROMPT_SP overwrite: CR + space overwrites previous char" {
+    var t = TerminalState.init(24, 10)
+    // Simulate zsh PROMPT_SP: write '%', fill spaces, CR, space, CR
+    t.inverse = true
+    t.putChar('%')
+    t.inverse = false
+    var i: i64 = 0
+    while (i < 9) { t.putChar(' '); i += 1 }
+    t.carriageReturn()
+    t.putChar(' ')
+    t.carriageReturn()
+    // Cell at (0,0) should now be a space, not '%'
+    const c = t.grid.getCell(0, 0)
+    @assertEq(c.codepoint, ' ')
+    @assertEq(c.flags & 4, 0)  // no INVERSE flag
+}
+
 test "backspace clamps at zero" {
     var t = TerminalState.init(24, 80)
     t.putChar('A')

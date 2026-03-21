@@ -44,28 +44,42 @@ fn pipeWriteFd(fds: i64) i64 {
 /// Top-level function for the IO reader thread.
 /// Reads from PTY fd in a blocking loop, feeds bytes through VT parser
 /// under mutex, then signals main thread via notification pipe.
+/// IO reader thread: reads PTY output, drains all available data before signaling.
+/// Port of Ghostty Exec.zig:1266-1347: set fd non-blocking, read in tight
+/// loop until WouldBlock, process under lock, poll(-1) to wait for more.
 fn ioReaderMain(arg: i64) void {
     const surface = @intToPtr(*Surface, arg)
     const fd = surface.shell.master_fd
+    set_nonblocking(fd)
     var buf = alloc(0, 4096)
     defer dealloc(buf)
     while (true) {
-        const n = fd_read(fd, buf, 4096)
-        if (n <= 0) {
-            // Child process exited — set atomic flag and signal main thread
-            surface.markChildExited()
-            fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
-            break
-        }
+        // Inner read loop: drain all available data (Ghostty:1297-1327)
         surface.terminal_mutex.lock()
-        for i in 0..n {
-            const b = @intToPtr(*u8, buf + i).*
-            surface.parser.feed(surface.terminal, b)
+        var got_data = false
+        while (true) {
+            const n = fd_read(fd, buf, 4096)
+            if (n == 0) {
+                // Child process exited — set atomic flag and signal main thread
+                surface.terminal_mutex.unlock()
+                surface.markChildExited()
+                fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
+                return
+            }
+            if (n < 0) { break }
+            got_data = true
+            for i in 0..n {
+                surface.parser.feed(surface.terminal, @intToPtr(*u8, buf + i).*)
+            }
         }
         surface.terminal_mutex.unlock()
-        surface.markRenderDirty()
-        // Notify main thread via pipe (for title/bell/child-exit signals)
-        fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
+        if (got_data) {
+            surface.markRenderDirty()
+            fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
+        }
+        // Wait for more data (Ghostty:1330)
+        const pr = poll_read(fd, -1)
+        if (pr <= 0) { break }
     }
 }
 
@@ -287,8 +301,8 @@ struct Surface {
     /// Create a terminal surface with a shell spawned via Cot's PTY.
     /// Sets up IO reader thread: mutex, notification pipe, and spawns thread.
     /// Heap-allocated with ARC for pointer stability (IO thread holds raw pointer).
-    static fn initTerminal(rows: i64, cols: i64) *Surface {
-        const pty = Pty.spawn(rows, cols)
+    static fn initTerminal(rows: i64, cols: i64, integration_dir: string) *Surface {
+        const pty = Pty.spawn(rows, cols, integration_dir)
         var term = TerminalState.init(rows, cols)
         term.pty_fd = pty.master_fd
 
@@ -3457,7 +3471,7 @@ test "surface move down from last line no-op" {
 }
 
 test "terminal surface kind" {
-    var s = Surface.initTerminal(24, 80)
+    var s = Surface.initTerminal(24, 80, "")
     @assertEq(s.kind, SurfaceKind.Terminal)
     @assert(s.isTerminal())
     @assertEq(s.title(), "terminal")
