@@ -1961,7 +1961,7 @@ export fn cotty_workspace_split(ws: i64, direction: i64, rows: i64, cols: i64) i
     const tab_handle = @ptrToInt(wptr.tabs.get(wptr.selected_index).surface)
     const tree = findOrCreateSplitTree(tab_handle)
     // Create new terminal surface
-    const new_surface = wptr.app.addTerminalSurface(rows, cols)
+    const new_surface = wptr.app.addTerminalSurface(rows, cols, "")
     const new_handle = @ptrToInt(new_surface)
     tree.split(direction, new_handle)
     // Wire inspector + start IO thread (same as addTerminalTab)
