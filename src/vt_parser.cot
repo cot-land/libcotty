@@ -2598,3 +2598,29 @@ test "jump to next prompt returns -1 when none" {
     const result = t.jumpToNextPrompt()
     @assertEq(result, -1)
 }
+
+test "PROMPT_SP via VT parser: exact zsh bytes" {
+    var t = TerminalState.init(24, 80)
+    var p = VtParser.init()
+    // ESC[1m = bold
+    p.feed(t, 0x1B); p.feed(t, '['); p.feed(t, '1'); p.feed(t, 'm')
+    // ESC[7m = reverse
+    p.feed(t, 0x1B); p.feed(t, '['); p.feed(t, '7'); p.feed(t, 'm')
+    // %
+    p.feed(t, '%')
+    // ESC[27m = no reverse
+    p.feed(t, 0x1B); p.feed(t, '['); p.feed(t, '2'); p.feed(t, '7'); p.feed(t, 'm')
+    // ESC[1m = bold
+    p.feed(t, 0x1B); p.feed(t, '['); p.feed(t, '1'); p.feed(t, 'm')
+    // ESC[0m = reset
+    p.feed(t, 0x1B); p.feed(t, '['); p.feed(t, '0'); p.feed(t, 'm')
+    // 79 spaces
+    for si in 0..79 { p.feed(t, ' ') }
+    // CR, space (overwrites %), CR
+    p.feed(t, 0x0D)
+    p.feed(t, ' ')
+    p.feed(t, 0x0D)
+    // Cell at (0,0) should be space, NOT '%'
+    const c = t.grid.getCell(0, 0)
+    @assertEq(c.codepoint, ' ')
+}
