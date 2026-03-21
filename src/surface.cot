@@ -35,12 +35,12 @@ fn pipeWriteFd(fds: i64) i64 {
 /// under mutex, then signals main thread via notification pipe.
 /// IO reader thread: reads PTY output and feeds through VT parser.
 ///
-/// TODO: Implement Ghostty's non-blocking drain pattern (Exec.zig:1248-1347)
-/// to process ALL available data under one lock hold before signaling render.
-/// This requires adding poll_read() to the Cot runtime. Currently we do
-/// blocking reads which can cause partial-state renders (e.g. zsh PROMPT_SP
-/// '%' visible before the overwrite sequence). Worked around in shell
-/// integration via no_prompt_sp.
+/// TODO: Implement Ghostty's non-blocking drain pattern (Exec.zig:1248-1347).
+/// poll_read() and set_nonblocking() are now in the runtime, but
+/// set_nonblocking on a PTY master fd causes poll_read to never wake up
+/// in Cot-compiled binaries (works in equivalent C). Root cause unknown —
+/// see claude/POLL_READ_IMPLEMENTATION.md. Shell integration no_prompt_sp
+/// handles the symptom until this is resolved.
 fn ioReaderMain(arg: i64) void {
     const surface = @intToPtr(*Surface, arg)
     const fd = surface.shell.master_fd

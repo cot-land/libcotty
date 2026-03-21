@@ -5,10 +5,8 @@
 # It restores the user's ZDOTDIR, sources their .zshenv, then loads
 # the cotty-integration script for interactive shells.
 
-# Disable PROMPT_SP — the '%' partial-line indicator for unterminated output.
-# With shell integration active, OSC 133 markers handle prompt boundaries
-# and the '%' indicator is redundant. Ghostty's integration also documents
-# this interaction (ghostty-integration line 110-111).
+# Disable PROMPT_SP until the non-blocking IO drain pattern works.
+# See claude/POLL_READ_IMPLEMENTATION.md for investigation status.
 'builtin' 'setopt' 'no_prompt_sp' 2>/dev/null
 
 # Restore original ZDOTDIR (saved by Cotty before spawning zsh).
