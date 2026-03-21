@@ -37,7 +37,7 @@ All logic lives in Cot (libcotty). Swift is only platform bindings.
 - [x] Go to matching bracket (bracket match highlighting exists)
 - [x] Line numbers in gutter
 - [x] Go to line (Cmd+G dialog)
-- [ ] Scroll past end (visual overscroll)
+- [x] Scroll past end (visual overscroll)
 
 ### 1.3 Selection
 
@@ -50,7 +50,7 @@ All logic lives in Cot (libcotty). Swift is only platform bindings.
 - [x] Multiple cursors (Cmd+click)
 - [x] Add next occurrence (Cmd+D)
 - [x] Select line (Cmd+L)
-- [ ] Highlight all occurrences of selected word
+- [x] Highlight all occurrences of selected word
 
 ### 1.4 Search
 
@@ -78,10 +78,10 @@ All logic lives in Cot (libcotty). Swift is only platform bindings.
 
 ### 2.2 Code Intelligence
 
-- [ ] Comment toggle (Cmd+/) — language-aware line/block comment
+- [x] Comment toggle (Cmd+/) — language-aware line/block comment
 - [ ] Auto-detect indent style (tabs vs spaces, indent width)
-- [ ] Trim trailing whitespace on save
-- [ ] Insert final newline on save
+- [x] Trim trailing whitespace on save
+- [x] Insert final newline on save
 - [ ] Show whitespace (toggle visible spaces/tabs/newlines)
 
 ### 2.3 LSP Integration
@@ -106,8 +106,8 @@ All logic lives in Cot (libcotty). Swift is only platform bindings.
 - [x] Save (Cmd+S)
 - [x] Save As (Cmd+Shift+S)
 - [x] Modified file indicator (dirty dot on tab)
-- [ ] Revert file to saved state
-- [ ] Auto-save (configurable interval)
+- [x] Revert file to saved state
+- [x] Auto-save (5-second interval)
 - [x] Warn on close with unsaved changes
 - [ ] Watch file for external changes and prompt reload
 - [ ] Recent files list
@@ -116,10 +116,10 @@ All logic lives in Cot (libcotty). Swift is only platform bindings.
 
 - [x] File tree sidebar with expand/collapse
 - [x] File tree auto-populate from PWD
-- [ ] File tree: rename/delete/new file
+- [x] File tree: new file/folder, delete file (rename blocked on stdlib)
 - [ ] File tree: file icons by extension
-- [ ] Fuzzy file finder (Cmd+P)
-- [ ] Project-wide search (Cmd+Shift+F)
+- [x] Fuzzy file finder (Cmd+P)
+- [x] Project-wide search (Cmd+Shift+F)
 
 ---
 
@@ -133,7 +133,7 @@ All logic lives in Cot (libcotty). Swift is only platform bindings.
 - [x] Cursor blink
 - [x] Soft word wrap
 - [x] Status bar (line, column, mode)
-- [ ] Current line highlight
+- [x] Current line highlight
 - [ ] Indent guides (vertical lines at indent levels)
 - [ ] Minimap
 - [ ] Smooth scroll animation
@@ -151,16 +151,10 @@ All logic lives in Cot (libcotty). Swift is only platform bindings.
 
 | Phase | Total | Done | Remaining |
 |-------|-------|------|-----------|
-| 1 — Core Editing | 33 | 31 | 2 |
-| 2 — Language Editing | 12 | 2 | 10 |
-| 3 — File Management | 14 | 6 | 8 |
-| 4 — Polish | 8 | 4 | 4 |
-| **Total** | **67** | **43** | **24** |
+| 1 — Core Editing | 33 | 33 | 0 |
+| 2 — Language Editing | 12 | 5 | 7 |
+| 3 — File Management | 14 | 11 | 3 |
+| 4 — Polish | 8 | 5 | 3 |
+| **Total** | **67** | **54** | **13** |
 
-**~63% complete.** Phase 1 is nearly done — only 2 items remain:
-highlight all occurrences, and scroll past end (both need render-layer work).
-
-### Phase 1 Remaining
-
-1. Highlight all occurrences of selection
-2. Scroll past end (visual overscroll)
+**~81% complete.** Phase 1 done. Batch 3 complete: file tree ops, fuzzy finder (Cmd+P), project search (Cmd+Shift+F). Remaining: file tree rename (needs stdlib rename), file icons, external file watching, recent files, search features (regex, find in selection), LSP, visual polish.
