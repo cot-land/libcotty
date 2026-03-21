@@ -5,10 +5,6 @@
 # It restores the user's ZDOTDIR, sources their .zshenv, then loads
 # the cotty-integration script for interactive shells.
 
-# Disable PROMPT_SP until the non-blocking IO drain pattern works.
-# See claude/POLL_READ_IMPLEMENTATION.md for investigation status.
-'builtin' 'setopt' 'no_prompt_sp' 2>/dev/null
-
 # Restore original ZDOTDIR (saved by Cotty before spawning zsh).
 if [[ -n "${COTTY_ZSH_ZDOTDIR+X}" ]]; then
     'builtin' 'export' ZDOTDIR="$COTTY_ZSH_ZDOTDIR"

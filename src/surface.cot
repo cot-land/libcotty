@@ -33,28 +33,35 @@ fn pipeWriteFd(fds: i64) i64 {
 /// Top-level function for the IO reader thread.
 /// Reads from PTY fd in a blocking loop, feeds bytes through VT parser
 /// under mutex, then signals main thread via notification pipe.
-/// IO reader thread: reads PTY output and feeds through VT parser.
-///
-/// TODO: Implement Ghostty's non-blocking drain pattern (Exec.zig:1248-1347).
-/// poll_read() and set_nonblocking() are now in the runtime, but
-/// set_nonblocking on a PTY master fd causes poll_read to never wake up
-/// in Cot-compiled binaries (works in equivalent C). Root cause unknown —
-/// see claude/POLL_READ_IMPLEMENTATION.md. Shell integration no_prompt_sp
-/// handles the symptom until this is resolved.
+/// IO reader thread: reads PTY output, drains all available data before signaling.
+/// Port of Ghostty Exec.zig:1266-1347: set fd non-blocking, read in tight
+/// loop until WouldBlock, process under lock, poll(-1) to wait for more.
 fn ioReaderMain(arg: i64) void {
     const surface = @intToPtr(*Surface, arg)
     const fd = surface.shell.master_fd
+    set_nonblocking(fd)
     var buf = alloc(0, 4096)
     defer dealloc(buf)
     while (true) {
-        const n = fd_read(fd, buf, 4096)
-        if (n <= 0) { break }
+        // Inner read loop: drain all available data (Ghostty:1297-1327)
         surface.terminal_mutex.lock()
-        for i in 0..n {
-            surface.parser.feed(surface.terminal, @intToPtr(*u8, buf + i).*)
+        var got_data = false
+        while (true) {
+            const n = fd_read(fd, buf, 4096)
+            if (n == 0) { surface.terminal_mutex.unlock(); return }
+            if (n < 0) { break }
+            got_data = true
+            for i in 0..n {
+                surface.parser.feed(surface.terminal, @intToPtr(*u8, buf + i).*)
+            }
         }
         surface.terminal_mutex.unlock()
-        fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
+        if (got_data) {
+            fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
+        }
+        // Wait for more data (Ghostty:1330)
+        const pr = poll_read(fd, -1)
+        if (pr <= 0) { break }
     }
 }
 
