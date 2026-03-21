@@ -33,6 +33,14 @@ fn pipeWriteFd(fds: i64) i64 {
 /// Top-level function for the IO reader thread.
 /// Reads from PTY fd in a blocking loop, feeds bytes through VT parser
 /// under mutex, then signals main thread via notification pipe.
+/// IO reader thread: reads PTY output and feeds through VT parser.
+///
+/// TODO: Implement Ghostty's non-blocking drain pattern (Exec.zig:1248-1347)
+/// to process ALL available data under one lock hold before signaling render.
+/// This requires adding poll_read() to the Cot runtime. Currently we do
+/// blocking reads which can cause partial-state renders (e.g. zsh PROMPT_SP
+/// '%' visible before the overwrite sequence). Worked around in shell
+/// integration via no_prompt_sp.
 fn ioReaderMain(arg: i64) void {
     const surface = @intToPtr(*Surface, arg)
     const fd = surface.shell.master_fd
@@ -43,11 +51,9 @@ fn ioReaderMain(arg: i64) void {
         if (n <= 0) { break }
         surface.terminal_mutex.lock()
         for i in 0..n {
-            const b = @intToPtr(*u8, buf + i).*
-            surface.parser.feed(surface.terminal, b)
+            surface.parser.feed(surface.terminal, @intToPtr(*u8, buf + i).*)
         }
         surface.terminal_mutex.unlock()
-        // Notify main thread — content doesn't matter, just a signal
         fd_write(surface.notify_pipe_write, @ptrOf("!"), 1)
     }
 }
