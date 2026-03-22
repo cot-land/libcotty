@@ -1,0 +1,25 @@
+/// File finder — fuzzy file search (stub for Linux build).
+import "std/list"
+import "std/string"
+
+struct FileFinder {
+    active: bool,
+    selected: i64,
+    name_buf: List(u8),
+    path_buf: List(u8),
+
+    static fn init() FileFinder {
+        var nb: List(u8) = .{}
+        var pb: List(u8) = .{}
+        return FileFinder { active: false, selected: 0, name_buf: nb, path_buf: pb }
+    }
+
+    fn open(root: string) void { _ = root }
+    fn dismiss() void { self.active = false }
+    fn setQuery(ptr: *u8, len: i64) void { _ = ptr; _ = len }
+    fn resultCount() i64 { return 0 }
+    fn resultName(index: i64) i64 { _ = index; return 0 }
+    fn resultPath(index: i64) i64 { _ = index; return 0 }
+    fn moveUp() void {}
+    fn moveDown() void {}
+}

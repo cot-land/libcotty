@@ -1,0 +1,32 @@
+/// Project search — project-wide text search (stub for Linux build).
+import "std/list"
+import "std/string"
+
+struct ProjectSearch {
+    active: bool,
+    selected_match: i64,
+    total_matches: i64,
+    path_buf: List(u8),
+    line_buf: List(u8),
+
+    static fn init() ProjectSearch {
+        var pb: List(u8) = .{}
+        var lb: List(u8) = .{}
+        return ProjectSearch { active: false, selected_match: 0, total_matches: 0, path_buf: pb, line_buf: lb }
+    }
+
+    fn open(root: string) void { _ = root }
+    fn dismiss() void { self.active = false }
+    fn setQuery(ptr: *u8, len: i64) void { _ = ptr; _ = len }
+    fn fileCount() i64 { return 0 }
+    fn flatCount() i64 { return 0 }
+    fn moveUp() void {}
+    fn moveDown() void {}
+    fn fileRelPath(idx: i64) i64 { _ = idx; return 0 }
+    fn fileFullPath(idx: i64) i64 { _ = idx; return 0 }
+    fn fileMatchCount(idx: i64) i64 { _ = idx; return 0 }
+    fn flatLineNum(idx: i64) i64 { _ = idx; return 0 }
+    fn flatCol(idx: i64) i64 { _ = idx; return 0 }
+    fn flatLineText(idx: i64) i64 { _ = idx; return 0 }
+    fn flatFileIndex(idx: i64) i64 { _ = idx; return 0 }
+}
