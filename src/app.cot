@@ -18,6 +18,7 @@ struct App {
     focused_surface: ?*Surface,
     running: bool,
     mailbox: List(Message),
+    integration_dir: string,
 
     /// Create and initialize the application with default config.
     static fn init() App {
@@ -30,6 +31,7 @@ struct App {
             focused_surface: null,
             running: true,
             mailbox: mailbox,
+            integration_dir: "",
         }
     }
 
@@ -52,8 +54,12 @@ struct App {
     }
 
     /// Add a terminal surface with the given dimensions. Returns its pointer.
+    /// Uses the app's integration_dir for shell integration (ZDOTDIR injection).
     fn addTerminalSurface(rows: i64, cols: i64, integration_dir: string) *Surface {
-        const s = Surface.initTerminal(rows, cols, integration_dir)
+        // Use the app's integration_dir if the caller didn't provide one
+        var dir = integration_dir
+        if (@lenOf(dir) == 0) { dir = self.integration_dir }
+        const s = Surface.initTerminal(rows, cols, dir)
         self.surfaces.append(s)
         self.focused_surface = s
         return s

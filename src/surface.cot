@@ -3261,16 +3261,11 @@ struct Surface {
     /// Set the render dirty flag (atomic). Called by IO thread after VT parse batch.
     fn markRenderDirty() void {
         self.render_dirty.store(1)
-        eprintln("[render] markDirty: self=${@ptrToInt(self)} &value=${@ptrToInt(&self.render_dirty.value)}")
     }
 
     /// Check and clear the render dirty flag (atomic). Called by Swift VSync callback.
     fn checkAndClearDirty() i64 {
-        const r = self.render_dirty.exchange(0)
-        if (r != 0) {
-            eprintln("[render] checkDirty: self=${@ptrToInt(self)} DIRTY r=${r}")
-        }
-        return r
+        return self.render_dirty.exchange(0)
     }
 
     /// Mark child process as exited (atomic). Called by IO thread on EOF.

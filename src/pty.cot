@@ -24,10 +24,11 @@ fn envHasPrefix(ptr: i64, len: i64, prefix: string) bool {
 }
 
 /// Check if an env var should be excluded (we're overriding it).
-fn isOverriddenEnvVar(ptr: i64, len: i64) bool {
+fn isOverriddenEnvVar(ptr: i64, len: i64, has_integration: bool) bool {
     if (envHasPrefix(ptr, len, "TERM=")) { return true }
     if (envHasPrefix(ptr, len, "COLORTERM=")) { return true }
     if (envHasPrefix(ptr, len, "TERM_PROGRAM=")) { return true }
+    if (has_integration and envHasPrefix(ptr, len, "ZDOTDIR=")) { return true }
     return false
 }
 
@@ -41,10 +42,29 @@ fn allocCString(s: string) i64 {
 }
 
 /// Build envp for PTY child: inherit parent env, override TERM/COLORTERM/TERM_PROGRAM.
+/// If integration_dir is non-empty, inject ZDOTDIR for zsh shell integration.
 /// Ghostty ref: Exec.zig Subprocess.init() — sets TERM, COLORTERM, TERM_PROGRAM.
-fn buildPtyEnvp() i64 {
+/// Ghostty ref: shell_integration.zig:891-917 (setupZsh) — ZDOTDIR injection.
+fn buildPtyEnvp(integration_dir: string) i64 {
     const parent_count = environ_count()
-    const extra_count: i64 = 3
+    const has_integration = @lenOf(integration_dir) > 0
+    var extra_count: i64 = 3  // TERM, COLORTERM, TERM_PROGRAM
+    if (has_integration) { extra_count += 1 }  // ZDOTDIR
+
+    // Scan for original ZDOTDIR to save as COTTY_ZSH_ZDOTDIR
+    var orig_zdotdir: string = ""
+    if (has_integration) {
+        var j: i64 = 0
+        while (j < parent_count) {
+            const ptr = environ_ptr(j)
+            const len = environ_len(j)
+            if (envHasPrefix(ptr, len, "ZDOTDIR=")) {
+                orig_zdotdir = @string(ptr + 8, len - 8)
+                extra_count += 1  // COTTY_ZSH_ZDOTDIR
+            }
+            j += 1
+        }
+    }
 
     // First pass: count entries to keep and total string size
     var keep_count: i64 = 0
@@ -53,7 +73,7 @@ fn buildPtyEnvp() i64 {
     while (i < parent_count) {
         const ptr = environ_ptr(i)
         const len = environ_len(i)
-        if (!isOverriddenEnvVar(ptr, len)) {
+        if (!isOverriddenEnvVar(ptr, len, has_integration)) {
             keep_count += 1
             keep_size += len + 1
         }
@@ -74,7 +94,7 @@ fn buildPtyEnvp() i64 {
     while (i < parent_count) {
         const ptr = environ_ptr(i)
         const len = environ_len(i)
-        if (!isOverriddenEnvVar(ptr, len)) {
+        if (!isOverriddenEnvVar(ptr, len, has_integration)) {
             memcpy(str_buf + pos, ptr, len)
             @intToPtr(*u8, str_buf + pos + len).* = @intCast(u8, 0)
             @intToPtr(*i64, envp + slot * 8).* = str_buf + pos
@@ -91,6 +111,21 @@ fn buildPtyEnvp() i64 {
     slot += 1
     @intToPtr(*i64, envp + slot * 8).* = allocCString("TERM_PROGRAM=cotty")
     slot += 1
+
+    // Inject ZDOTDIR for zsh shell integration
+    if (has_integration) {
+        // ZDOTDIR=<integration_dir>/zsh
+        const zdotdir_val = "ZDOTDIR=" + integration_dir + "/zsh"
+        @intToPtr(*i64, envp + slot * 8).* = allocCString(zdotdir_val)
+        slot += 1
+
+        // Save original ZDOTDIR so .zshenv can restore it
+        if (@lenOf(orig_zdotdir) > 0) {
+            const save_val = "COTTY_ZSH_ZDOTDIR=" + orig_zdotdir
+            @intToPtr(*i64, envp + slot * 8).* = allocCString(save_val)
+            slot += 1
+        }
+    }
 
     // Null-terminate the pointer array
     @intToPtr(*i64, envp + slot * 8).* = 0
@@ -122,7 +157,7 @@ struct Pty {
         const shell = THEME_SHELL
         const path = buildPath(shell)
         const argv = argvBuild1(shell)
-        const envp = buildPtyEnvp()
+        const envp = buildPtyEnvp(integration_dir)
 
         const pid = fork()
         if (pid < 0) {
