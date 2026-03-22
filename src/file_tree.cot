@@ -77,9 +77,13 @@ struct FileTree {
             const name = names.get(i)
             // Skip hidden files (starting with '.')
             if (name.len > 0 and name[0] == '.') { continue }
+            // Copy name so it survives after names list is freed
+            const name_copy_ptr = alloc_raw(name.len)
+            memcpy(@intCast(i64, name_copy_ptr), @ptrOf(name), name.len)
+            const name_copy = @string(@intCast(i64, name_copy_ptr), name.len)
             const full = join(self.root_path, name)
             const entry = FileEntry {
-                name: name,
+                name: name_copy,
                 full_path: full,
                 is_dir: isDir(full),
                 depth: 0,
@@ -100,8 +104,7 @@ struct FileTree {
             self.entries.append(tmp.get(i))
         }
         self.root_child_count = tmp.count
-        tmp.free()
-        names.free()
+        // Don't free tmp/names — their strings are now owned by self.entries
     }
 
     /// Lazy-load children for a directory entry at the given index.
@@ -130,9 +133,13 @@ struct FileTree {
             const name = names.get(i)
             // Skip hidden files
             if (name.len > 0 and name[0] == '.') { continue }
+            // Copy name so it survives after names list is freed
+            const name_copy_ptr = alloc_raw(name.len)
+            memcpy(@intCast(i64, name_copy_ptr), @ptrOf(name), name.len)
+            const name_copy = @string(@intCast(i64, name_copy_ptr), name.len)
             const full = join(parent_full_path, name)
             const entry = FileEntry {
-                name: name,
+                name: name_copy,
                 full_path: full,
                 is_dir: isDir(full),
                 depth: parent_depth + 1,
@@ -157,8 +164,7 @@ struct FileTree {
         parent = @intToPtr(*FileEntry, self.entries.items + parent_idx * @sizeOf(FileEntry))
         parent.child_count = tmp.count
         parent.children_loaded = true
-        tmp.free()
-        names.free()
+        // Don't free tmp/names — their strings are now owned by self.entries
     }
 
     /// Toggle expand/collapse for the directory at the given visible row.
